@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# uv
+.uv/
+uv.lock
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Environment files
+.env
+!.env.example
+
+# Logs
+*.log
+scraper.log
+
+# State file (contains run history — do not commit)
+scraper_state.json
+
+# Output documents (generated artefacts)
+output_docs/*.docx
+
+# Temporary images
+temp_images/*.jpg
+temp_images/*.jpeg
+temp_images/*.png
+temp_images/*.gif
+temp_images/*.webp
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+docs

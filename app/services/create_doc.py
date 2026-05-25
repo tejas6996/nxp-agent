@@ -1,0 +1,419 @@
+"""
+Main pipeline orchestrator and Word document builder.
+
+This module is the primary entrypoint called by both the FastAPI /run
+endpoint and the standalone app/run.py script.
+"""
+
+import asyncio
+import json
+import logging
+from collections import defaultdict
+from datetime import date, datetime, timedelta
+from io import BytesIO
+from pathlib import Path
+from typing import Any
+
+import httpx
+from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Inches, Pt
+
+from app.exceptions import DocumentBuildError, StatePersistenceError
+from app.infra.firecrawl import FirecrawlClient
+from app.infra.openai import OpenAIClient
+from app.models import DigestRunResult
+from app.services.agent import extract_article_contents, extract_articles_from_listings
+from app.services.crawling import scrape_articles, scrape_listing_pages
+from app.settings import Settings
+from app.sites import SITES
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# State management
+# ---------------------------------------------------------------------------
+
+
+def load_state(state_path: Path) -> dict[str, Any]:
+    """Load run state from the JSON state file.
+
+    Args:
+        state_path: Path to scraper_state.json.
+
+    Returns:
+        State dict with at minimum a 'seen_urls' key.
+        Returns empty state if the file does not exist.
+
+    Raises:
+        StatePersistenceError: If the file exists but cannot be read or parsed.
+    """
+    if not state_path.exists():
+        logger.info("No state file at %s. Starting with empty state.", state_path)
+        return {"seen_urls": {}}
+    try:
+        with state_path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        raise StatePersistenceError(
+            f"Failed to read state file {state_path}: {exc}"
+        ) from exc
+
+
+def save_state(
+    state_path: Path,
+    seen_urls: dict[str, str],
+    run_date: str,
+) -> None:
+    """Persist run state to the JSON state file.
+
+    Args:
+        state_path: Path to scraper_state.json.
+        seen_urls: Mapping of article URL to the ISO date it was first seen.
+        run_date: ISO date string for the current run.
+
+    Raises:
+        StatePersistenceError: If the file cannot be written.
+    """
+    state = {"last_run_date": run_date, "seen_urls": seen_urls}
+    try:
+        state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        logger.info("State saved to %s. Tracking %d URLs.", state_path, len(seen_urls))
+    except OSError as exc:
+        raise StatePersistenceError(
+            f"Failed to write state file {state_path}: {exc}"
+        ) from exc
+
+
+def _is_within_lookback(date_str: str | None, lookback_days: int) -> bool:
+    """Check if a date string is within the lookback window.
+
+    Args:
+        date_str: Date string (YYYY-MM-DD format preferred; other formats attempted).
+        lookback_days: Number of days to look back from today.
+
+    Returns:
+        True if the date is within the lookback window, False otherwise.
+        Returns True if the date cannot be parsed or is null (benefit of the doubt).
+    """
+    if not date_str:
+        # Cannot determine age — include the article to avoid silently dropping new content
+        return True
+    try:
+        # Try ISO format first
+        article_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except ValueError:
+        try:
+            # Try common alternative formats
+            for fmt in ["%B %d, %Y", "%b %d, %Y", "%d-%m-%Y", "%m/%d/%Y"]:
+                try:
+                    article_date = datetime.strptime(date_str, fmt).date()
+                    break
+                except ValueError:
+                    continue
+            else:
+                logger.debug("Could not parse date: %s", date_str)
+                return False
+        except Exception:
+            return False
+
+    cutoff = date.today() - timedelta(days=lookback_days)
+    return article_date >= cutoff
+
+
+# ---------------------------------------------------------------------------
+# Document building helpers
+# ---------------------------------------------------------------------------
+
+
+def _add_hyperlink(paragraph: Any, text: str, url: str) -> None:
+    """Inject a clickable hyperlink into a paragraph via OOXML.
+
+    Args:
+        paragraph: The python-docx paragraph to append the hyperlink to.
+        text: Display text for the hyperlink.
+        url: The target URL.
+    """
+    part = paragraph.part
+    r_id = part.relate_to(
+        url,
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+        is_external=True,
+    )
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), r_id)
+
+    run = OxmlElement("w:r")
+    r_pr = OxmlElement("w:rPr")
+    r_style = OxmlElement("w:rStyle")
+    r_style.set(qn("w:val"), "Hyperlink")
+    r_pr.append(r_style)
+    run.append(r_pr)
+
+    t = OxmlElement("w:t")
+    t.text = text
+    run.append(t)
+    hyperlink.append(run)
+    paragraph._p.append(hyperlink)
+
+
+def _embed_image(doc: Document, image_url: str, max_width: float = 5.5) -> None:
+    """Download and embed an image into the document.
+
+    Silently skips on any download or embed failure so the article is
+    still written without an image.
+
+    Args:
+        doc: The python-docx Document object.
+        image_url: URL of the image to embed.
+        max_width: Maximum image width in inches.
+    """
+    try:
+        response = httpx.get(image_url, timeout=10, follow_redirects=True)
+        response.raise_for_status()
+        doc.add_picture(BytesIO(response.content), width=Inches(max_width))
+    except Exception as exc:
+        logger.warning("Failed to embed image from %s: %s", image_url, exc)
+
+
+def _build_document(
+    articles_by_source: dict[str, list[dict[str, Any]]],
+    output_dir: Path,
+    run_date: date,
+) -> Path:
+    """Build the Word document news digest.
+
+    Args:
+        articles_by_source: Articles grouped by source/company name.
+        output_dir: Directory where the .docx file will be saved.
+        run_date: Date of this pipeline run; used in cover page and filename.
+
+    Returns:
+        Path to the saved .docx file.
+
+    Raises:
+        DocumentBuildError: If the document cannot be saved.
+    """
+    total = sum(len(v) for v in articles_by_source.values())
+    doc = Document()
+
+    # Cover section
+    cover_run = doc.add_paragraph().add_run("DAILY TECH NEWS DIGEST")
+    cover_run.bold = True
+    cover_run.font.size = Pt(24)
+
+    date_para = doc.add_paragraph(run_date.strftime("%A, %B %d, %Y"))
+    date_para.runs[0].font.size = Pt(14)
+
+    doc.add_paragraph(
+        f"{total} new articles across {len(articles_by_source)} sources"
+    )
+    doc.add_page_break()
+
+    # Articles grouped by source
+    for source_name, articles in articles_by_source.items():
+        doc.add_heading(f"{source_name}  ({len(articles)} articles)", level=1)
+
+        for article in articles:
+            # H2 title with embedded hyperlink
+            title_para = doc.add_paragraph(style="Heading 2")
+            _add_hyperlink(
+                title_para,
+                article.get("title", "Untitled"),
+                article["url"],
+            )
+
+            # Publication date
+            if article.get("date"):
+                date_run = doc.add_paragraph(article["date"]).runs
+                if date_run:
+                    date_run[0].italic = True
+
+            # Featured image
+            if article.get("image_url"):
+                _embed_image(doc, article["image_url"])
+
+            # 300-word content excerpt
+            if article.get("content"):
+                doc.add_paragraph(article["content"])
+
+            # Spacer between articles
+            doc.add_paragraph()
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"News_Digest_{run_date.strftime('%Y%m%d')}.docx"
+    try:
+        doc.save(str(output_path))
+        logger.info("Document saved: %s", output_path)
+    except OSError as exc:
+        raise DocumentBuildError(
+            f"Failed to save document {output_path}: {exc}"
+        ) from exc
+
+    return output_path
+
+
+# ---------------------------------------------------------------------------
+# Pipeline orchestrator
+# ---------------------------------------------------------------------------
+
+
+async def run_pipeline(settings: Settings) -> DigestRunResult:
+    """Execute the full news scraping and digest generation pipeline.
+
+    Stages:
+        1. Load state (seen URLs).
+        2. Scrape all listing pages concurrently via Firecrawl.
+        2b. Re-scrape redirect URLs for hub pages that returned no articles.
+        3. Filter out URLs already present in seen_urls.
+        4. Scrape each new article page concurrently via Firecrawl.
+        5. Extract 300-word content and image per article via GPT.
+        6. Build Word document grouped by source.
+        7. Save updated state (only on reaching this point).
+
+    Args:
+        settings: Application settings instance.
+
+    Returns:
+        DigestRunResult summarising the run.
+    """
+    run_date = date.today()
+    errors: list[str] = []
+    state_path = Path(settings.state_file)
+
+    state = load_state(state_path)
+    seen_urls: dict[str, str] = state.get("seen_urls", {})
+    last_run_date = state.get("last_run_date")
+    is_first_run = last_run_date is None
+
+    firecrawl = FirecrawlClient(settings)
+    openai = OpenAIClient(settings)
+    semaphore = asyncio.Semaphore(settings.max_concurrent_requests)
+
+    # Stage 1: Scrape listing pages
+    logger.info("Stage 1: Scraping %d listing pages.", len(SITES))
+    listing_results = await scrape_listing_pages(firecrawl, SITES, semaphore)
+    logger.info(
+        "Stage 1 complete. Scraped %d/%d listing pages.", len(listing_results), len(SITES)
+    )
+
+    # Stage 2: GPT extract article lists from each listing
+    logger.info("Stage 2: Extracting article lists from listing pages.")
+    all_articles, redirect_hints = await extract_articles_from_listings(
+        openai, listing_results, semaphore
+    )
+    logger.info("Stage 2 complete. Found %d articles across all sources.", len(all_articles))
+
+    # Stage 2b: Re-scrape sites that returned a redirect URL (hub/nav pages)
+    if redirect_hints:
+        logger.info(
+            "Stage 2b: Following redirect hints for %d sites.", len(redirect_hints)
+        )
+        redirect_sites = [
+            {"name": r["source_name"], "url": r["redirect_url"]} for r in redirect_hints
+        ]
+        redirect_listings = await scrape_listing_pages(firecrawl, redirect_sites, semaphore)
+        redirect_articles, _ = await extract_articles_from_listings(
+            openai, redirect_listings, semaphore
+        )
+        logger.info(
+            "Stage 2b complete. Found %d additional articles from redirected pages.",
+            len(redirect_articles),
+        )
+        all_articles.extend(redirect_articles)
+
+    # Stage 3: Filter seen URLs and invalid URLs
+    new_articles = [
+        a
+        for a in all_articles
+        if a.get("url")
+        and a["url"].startswith("http")
+        and a["url"] not in seen_urls
+    ]
+    logger.info(
+        "Stage 3 complete. %d new articles after filtering %d seen URLs.",
+        len(new_articles),
+        len(seen_urls),
+    )
+
+    # First-run date filter: on initial run, only keep articles from last N days
+    if is_first_run and new_articles:
+        logger.info("First run detected. Applying lookback filter (%d days).", settings.lookback_days)
+        new_articles = [
+            a for a in new_articles if _is_within_lookback(a.get("date"), settings.lookback_days)
+        ]
+        logger.info(
+            "After lookback filter: %d articles within last %d days.",
+            len(new_articles),
+            settings.lookback_days,
+        )
+
+    if not new_articles:
+        logger.info("No new articles found. Saving state.")
+        today_str = run_date.isoformat()
+        save_state(state_path, seen_urls, today_str)
+        return DigestRunResult(
+            run_date=run_date,
+            total_articles=0,
+            sources_processed=len(listing_results),
+            document_path=None,
+            errors=[],
+        )
+
+    # On first run: just populate state and skip doc building
+    if is_first_run:
+        logger.info("First run: populating state without building document.")
+        today_str = run_date.isoformat()
+        for article in new_articles:
+            seen_urls[article["url"]] = today_str
+        save_state(state_path, seen_urls, today_str)
+        return DigestRunResult(
+            run_date=run_date,
+            total_articles=len(new_articles),
+            sources_processed=len(listing_results),
+            document_path=None,
+            errors=errors,
+        )
+
+    # Stage 4: Scrape each new article page
+    logger.info("Stage 4: Scraping %d new article pages.", len(new_articles))
+    scraped_articles = await scrape_articles(firecrawl, new_articles, semaphore)
+    logger.info("Stage 4 complete. Scraped %d articles.", len(scraped_articles))
+
+    # Stage 5: GPT extract content from each article
+    logger.info("Stage 5: Extracting content from %d articles.", len(scraped_articles))
+    extracted_articles = await extract_article_contents(openai, scraped_articles, semaphore)
+    logger.info(
+        "Stage 5 complete. Extracted content for %d articles.", len(extracted_articles)
+    )
+
+    # Stage 6: Build Word document
+    logger.info("Stage 6: Building Word document.")
+    articles_by_source: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for article in extracted_articles:
+        articles_by_source[article["source_name"]].append(article)
+
+    doc_path: Path | None = None
+    try:
+        doc_path = _build_document(
+            dict(articles_by_source), Path(settings.output_dir), run_date
+        )
+    except DocumentBuildError as exc:
+        logger.error("Document build failed: %s", exc)
+        errors.append(str(exc))
+
+    # Stage 7: Save state
+    today_str = run_date.isoformat()
+    for article in extracted_articles:
+        seen_urls[article["url"]] = today_str
+    save_state(state_path, seen_urls, today_str)
+
+    return DigestRunResult(
+        run_date=run_date,
+        total_articles=len(extracted_articles),
+        sources_processed=len(listing_results),
+        document_path=str(doc_path) if doc_path else None,
+        errors=errors,
+    )
