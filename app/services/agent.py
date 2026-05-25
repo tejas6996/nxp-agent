@@ -15,6 +15,12 @@ from app.infra.openai import OpenAIClient
 
 logger = logging.getLogger(__name__)
 
+# Keywords that must appear in a redirect URL path for it to be accepted.
+# Prevents GPT from redirecting to product pages, resource hubs, or homepages.
+_NEWS_URL_KEYWORDS = frozenset(
+    {"news", "press", "blog", "release", "newsroom", "announcement", "media", "investor"}
+)
+
 _LISTING_SYSTEM_PROMPT = """You are a precise data extraction assistant specialising in technology company newsrooms.
 
 Your task is to extract a structured list of news articles from the markdown content of a newsroom or press release listing page.
@@ -34,10 +40,10 @@ Inclusion rules:
   - Exclude: navigation links, breadcrumbs, pagination controls, social media share buttons, category/tag labels, footer links, cookie notices, search widgets, and any link that does not point to a discrete article.
 
 Redirect rules:
-  - If after careful analysis you find NO articles on this page, but you can identify a single specific link that leads directly to a newsroom, press releases, blogs, or news listing sub-page, set "redirect_url" to that absolute URL.
-  - Only use redirect_url as a last resort when the current page is clearly a navigation hub or homepage and a more specific news listing URL is visible.
-  - Do NOT set redirect_url to a generic homepage, search page, or category hub. It must point to a page that directly lists individual articles.
-  - If no suitable redirect URL can be identified, omit the field entirely.
+  - If after careful analysis you find NO articles on this page, and the page content visibly contains a hyperlink that leads directly to a newsroom, press releases, blogs, or news listing sub-page, set "redirect_url" to that absolute URL.
+  - CRITICAL: The redirect_url must be a URL that literally appears as a hyperlink in the markdown content provided to you. Do NOT use any URL from your training data or prior knowledge. Do NOT guess or construct a URL. If the exact URL is not present in the content, omit this field entirely.
+  - Only use redirect_url when articles is an empty array and a specific news listing link is explicitly visible in the content.
+  - Do NOT set redirect_url to a generic homepage, search page, social media page, or broad category hub. It must point to a page that directly lists individual articles or press releases.
 
 Quality rules:
   - Do not include duplicate URLs.
@@ -94,7 +100,7 @@ async def extract_articles_from_listings(
             parsed = urlparse(listing["listing_url"])
             base_url = f"{parsed.scheme}://{parsed.netloc}"
             user_content = (
-                f"Base URL: {base_url}\n\nMarkdown:\n{listing['markdown'][:8000]}"
+                f"Base URL: {base_url}\n\nMarkdown:\n{listing['markdown'][:24000]}"
             )
             try:
                 data = await asyncio.to_thread(
@@ -106,17 +112,27 @@ async def extract_articles_from_listings(
 
                 redirect_hint: dict[str, str] | None = None
                 if not articles:
-                    redirect_url = data.get("redirect_url")
+                    raw_redirect = data.get("redirect_url", "")
+                    # Strip URL fragment anchors that break scraping
+                    redirect_url = raw_redirect.split("#")[0].rstrip("/") if raw_redirect else ""
                     if redirect_url and redirect_url.startswith("http"):
-                        redirect_hint = {
-                            "source_name": listing["source_name"],
-                            "redirect_url": redirect_url,
-                        }
-                        logger.info(
-                            "No articles from %s. Redirect suggested: %s",
-                            listing["source_name"],
-                            redirect_url,
-                        )
+                        url_lower = redirect_url.lower()
+                        if any(kw in url_lower for kw in _NEWS_URL_KEYWORDS):
+                            redirect_hint = {
+                                "source_name": listing["source_name"],
+                                "redirect_url": redirect_url,
+                            }
+                            logger.info(
+                                "No articles from %s. Redirect accepted: %s",
+                                listing["source_name"],
+                                redirect_url,
+                            )
+                        else:
+                            logger.info(
+                                "No articles from %s. Redirect rejected (non-news URL): %s",
+                                listing["source_name"],
+                                redirect_url,
+                            )
 
                 logger.info(
                     "Extracted %d articles from %s listing.",

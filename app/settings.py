@@ -33,7 +33,8 @@ class Settings(BaseSettings):
     lookback_days: int = Field(default=7, alias="LOOKBACK_DAYS")
     max_articles_per_site: int = Field(default=20, alias="MAX_ARTICLES_PER_SITE")
     request_delay_seconds: float = Field(default=1.0, alias="REQUEST_DELAY_SECONDS")
-    max_concurrent_requests: int = Field(default=5, alias="MAX_CONCURRENT_REQUESTS")
+    max_concurrent_requests: int = Field(default=2, alias="MAX_CONCURRENT_REQUESTS")
+    max_concurrent_openai: int = Field(default=15, alias="MAX_CONCURRENT_OPENAI")
 
     # Paths
     output_dir: str = Field(default="output_docs", alias="OUTPUT_DIR")

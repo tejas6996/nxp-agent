@@ -290,11 +290,12 @@ async def run_pipeline(settings: Settings) -> DigestRunResult:
 
     firecrawl = FirecrawlClient(settings)
     openai = OpenAIClient(settings)
-    semaphore = asyncio.Semaphore(settings.max_concurrent_requests)
+    firecrawl_semaphore = asyncio.Semaphore(settings.max_concurrent_requests)
+    openai_semaphore = asyncio.Semaphore(settings.max_concurrent_openai)
 
     # Stage 1: Scrape listing pages
     logger.info("Stage 1: Scraping %d listing pages.", len(SITES))
-    listing_results = await scrape_listing_pages(firecrawl, SITES, semaphore)
+    listing_results = await scrape_listing_pages(firecrawl, SITES, firecrawl_semaphore)
     logger.info(
         "Stage 1 complete. Scraped %d/%d listing pages.", len(listing_results), len(SITES)
     )
@@ -302,7 +303,7 @@ async def run_pipeline(settings: Settings) -> DigestRunResult:
     # Stage 2: GPT extract article lists from each listing
     logger.info("Stage 2: Extracting article lists from listing pages.")
     all_articles, redirect_hints = await extract_articles_from_listings(
-        openai, listing_results, semaphore
+        openai, listing_results, openai_semaphore
     )
     logger.info("Stage 2 complete. Found %d articles across all sources.", len(all_articles))
 
@@ -314,9 +315,9 @@ async def run_pipeline(settings: Settings) -> DigestRunResult:
         redirect_sites = [
             {"name": r["source_name"], "url": r["redirect_url"]} for r in redirect_hints
         ]
-        redirect_listings = await scrape_listing_pages(firecrawl, redirect_sites, semaphore)
+        redirect_listings = await scrape_listing_pages(firecrawl, redirect_sites, firecrawl_semaphore)
         redirect_articles, _ = await extract_articles_from_listings(
-            openai, redirect_listings, semaphore
+            openai, redirect_listings, openai_semaphore
         )
         logger.info(
             "Stage 2b complete. Found %d additional articles from redirected pages.",
@@ -362,29 +363,14 @@ async def run_pipeline(settings: Settings) -> DigestRunResult:
             errors=[],
         )
 
-    # On first run: just populate state and skip doc building
-    if is_first_run:
-        logger.info("First run: populating state without building document.")
-        today_str = run_date.isoformat()
-        for article in new_articles:
-            seen_urls[article["url"]] = today_str
-        save_state(state_path, seen_urls, today_str)
-        return DigestRunResult(
-            run_date=run_date,
-            total_articles=len(new_articles),
-            sources_processed=len(listing_results),
-            document_path=None,
-            errors=errors,
-        )
-
     # Stage 4: Scrape each new article page
     logger.info("Stage 4: Scraping %d new article pages.", len(new_articles))
-    scraped_articles = await scrape_articles(firecrawl, new_articles, semaphore)
+    scraped_articles = await scrape_articles(firecrawl, new_articles, firecrawl_semaphore)
     logger.info("Stage 4 complete. Scraped %d articles.", len(scraped_articles))
 
     # Stage 5: GPT extract content from each article
     logger.info("Stage 5: Extracting content from %d articles.", len(scraped_articles))
-    extracted_articles = await extract_article_contents(openai, scraped_articles, semaphore)
+    extracted_articles = await extract_article_contents(openai, scraped_articles, openai_semaphore)
     logger.info(
         "Stage 5 complete. Extracted content for %d articles.", len(extracted_articles)
     )
