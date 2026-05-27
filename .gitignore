@@ -57,3 +57,5 @@ Thumbs.db
 .coverage
 htmlcov/
 docs
+output_docs/
+temp_images/

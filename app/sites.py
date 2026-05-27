@@ -16,7 +16,7 @@ SITES: list[dict[str, str]] = [
     {"name": "Synopsys", "url": "https://news.synopsys.com/"},
     {"name": "Keysight", "url": "https://www.keysight.com/in/en/about/newsroom.html"},
     {"name": "Toshiba", "url": "http://toshiba.semicon-storage.com/ap-en/company/news.html"},
-    {"name": "Counterpoint Research", "url": "https://www.counterpointresearch.com/blog/"},
+    {"name": "Counterpoint Research", "url": "https://counterpointresearch.com/en/insights?category=research-briefs-blogs"},
     {"name": "Cadence", "url": "https://www.cadence.com/en_US/home/company/newsroom.html"},
     {"name": "Diodes", "url": "https://www.diodes.com/about/news/press-releases/"},
     {"name": "Qualcomm", "url": "https://www.qualcomm.com/news/releases"},

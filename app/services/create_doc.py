@@ -15,10 +15,20 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from docx import Document
-from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
-from docx.shared import Inches, Pt
+from PIL import Image as PILImage
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import (
+    HRFlowable,
+    Image as RLImage,
+    PageBreak,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+)
 
 from app.exceptions import DocumentBuildError, StatePersistenceError
 from app.infra.firecrawl import FirecrawlClient
@@ -127,55 +137,97 @@ def _is_within_lookback(date_str: str | None, lookback_days: int) -> bool:
 # Document building helpers
 # ---------------------------------------------------------------------------
 
+_PAGE_W, _PAGE_H = A4
+_MARGIN = 0.75 * inch
 
-def _add_hyperlink(paragraph: Any, text: str, url: str) -> None:
-    """Inject a clickable hyperlink into a paragraph via OOXML.
+
+def _get_styles() -> dict[str, ParagraphStyle]:
+    """Build and return the paragraph styles used in the PDF digest."""
+    base = getSampleStyleSheet()
+    return {
+        "cover_title": ParagraphStyle(
+            "cover_title",
+            parent=base["Title"],
+            fontSize=28,
+            leading=34,
+            textColor=colors.HexColor("#1a1a2e"),
+            alignment=TA_CENTER,
+            spaceAfter=12,
+        ),
+        "cover_sub": ParagraphStyle(
+            "cover_sub",
+            parent=base["Normal"],
+            fontSize=13,
+            leading=16,
+            textColor=colors.HexColor("#444444"),
+            alignment=TA_CENTER,
+            spaceAfter=6,
+        ),
+        "source_heading": ParagraphStyle(
+            "source_heading",
+            parent=base["Heading1"],
+            fontSize=16,
+            leading=20,
+            textColor=colors.HexColor("#1a1a2e"),
+            spaceBefore=18,
+            spaceAfter=6,
+            borderPad=4,
+        ),
+        "article_title": ParagraphStyle(
+            "article_title",
+            parent=base["Normal"],
+            fontSize=12,
+            leading=16,
+            textColor=colors.HexColor("#0057b7"),
+            spaceBefore=10,
+            spaceAfter=3,
+            fontName="Helvetica-Bold",
+        ),
+        "article_date": ParagraphStyle(
+            "article_date",
+            parent=base["Normal"],
+            fontSize=9,
+            leading=12,
+            textColor=colors.HexColor("#888888"),
+            spaceAfter=4,
+            fontName="Helvetica-Oblique",
+        ),
+        "article_body": ParagraphStyle(
+            "article_body",
+            parent=base["Normal"],
+            fontSize=10,
+            leading=14,
+            textColor=colors.HexColor("#222222"),
+            spaceAfter=8,
+            alignment=TA_LEFT,
+        ),
+    }
+
+
+def _fetch_image(image_url: str, max_width: float = 5.0 * inch) -> RLImage | None:
+    """Download an image and return a reportlab Image flowable.
+
+    Returns None on any download or format failure so the article is
+    still rendered without an image.
 
     Args:
-        paragraph: The python-docx paragraph to append the hyperlink to.
-        text: Display text for the hyperlink.
-        url: The target URL.
-    """
-    part = paragraph.part
-    r_id = part.relate_to(
-        url,
-        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
-        is_external=True,
-    )
-    hyperlink = OxmlElement("w:hyperlink")
-    hyperlink.set(qn("r:id"), r_id)
-
-    run = OxmlElement("w:r")
-    r_pr = OxmlElement("w:rPr")
-    r_style = OxmlElement("w:rStyle")
-    r_style.set(qn("w:val"), "Hyperlink")
-    r_pr.append(r_style)
-    run.append(r_pr)
-
-    t = OxmlElement("w:t")
-    t.text = text
-    run.append(t)
-    hyperlink.append(run)
-    paragraph._p.append(hyperlink)
-
-
-def _embed_image(doc: Document, image_url: str, max_width: float = 5.5) -> None:
-    """Download and embed an image into the document.
-
-    Silently skips on any download or embed failure so the article is
-    still written without an image.
-
-    Args:
-        doc: The python-docx Document object.
-        image_url: URL of the image to embed.
-        max_width: Maximum image width in inches.
+        image_url: URL of the image to download.
+        max_width: Maximum rendered width in points.
     """
     try:
         response = httpx.get(image_url, timeout=10, follow_redirects=True)
         response.raise_for_status()
-        doc.add_picture(BytesIO(response.content), width=Inches(max_width))
+        data = BytesIO(response.content)
+        pil_img = PILImage.open(data)
+        w, h = pil_img.size
+        aspect = h / w
+        rendered_w = min(max_width, _PAGE_W - 2 * _MARGIN)
+        rendered_h = rendered_w * aspect
+        data.seek(0)
+        return RLImage(data, width=rendered_w, height=rendered_h)
     except Exception as exc:
         logger.warning("Failed to embed image from %s: %s", image_url, exc)
+        return None
 
 
 def _build_document(
@@ -183,74 +235,99 @@ def _build_document(
     output_dir: Path,
     run_date: date,
 ) -> Path:
-    """Build the Word document news digest.
+    """Build the PDF news digest.
+
+    Article titles are rendered as clickable hyperlinks pointing to the
+    original article URL.
 
     Args:
         articles_by_source: Articles grouped by source/company name.
-        output_dir: Directory where the .docx file will be saved.
+        output_dir: Directory where the .pdf file will be saved.
         run_date: Date of this pipeline run; used in cover page and filename.
 
     Returns:
-        Path to the saved .docx file.
+        Path to the saved .pdf file.
 
     Raises:
         DocumentBuildError: If the document cannot be saved.
     """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"News_Digest_{run_date.strftime('%Y%m%d')}.pdf"
+
+    styles = _get_styles()
     total = sum(len(v) for v in articles_by_source.values())
-    doc = Document()
+    story: list[Any] = []
 
-    # Cover section
-    cover_run = doc.add_paragraph().add_run("DAILY TECH NEWS DIGEST")
-    cover_run.bold = True
-    cover_run.font.size = Pt(24)
-
-    date_para = doc.add_paragraph(run_date.strftime("%A, %B %d, %Y"))
-    date_para.runs[0].font.size = Pt(14)
-
-    doc.add_paragraph(
-        f"{total} new articles across {len(articles_by_source)} sources"
+    # Cover page
+    story.append(Spacer(1, 1.5 * inch))
+    story.append(Paragraph("DAILY TECH NEWS DIGEST", styles["cover_title"]))
+    story.append(Paragraph(run_date.strftime("%A, %B %d, %Y"), styles["cover_sub"]))
+    story.append(
+        Paragraph(
+            f"{total} new articles across {len(articles_by_source)} sources",
+            styles["cover_sub"],
+        )
     )
-    doc.add_page_break()
+    story.append(PageBreak())
 
     # Articles grouped by source
     for source_name, articles in articles_by_source.items():
-        doc.add_heading(f"{source_name}  ({len(articles)} articles)", level=1)
+        story.append(
+            Paragraph(f"{source_name} ({len(articles)} articles)", styles["source_heading"])
+        )
+        story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#cccccc"), spaceAfter=6))
 
         for article in articles:
-            # H2 title with embedded hyperlink
-            title_para = doc.add_paragraph(style="Heading 2")
-            _add_hyperlink(
-                title_para,
-                article.get("title", "Untitled"),
-                article["url"],
-            )
+            url = article.get("url", "")
+            title = article.get("title", "Untitled").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+            # Clickable title — opens article URL on click
+            if url:
+                title_html = f'<link href="{url}" color="#0057b7"><b>{title}</b></link>'
+            else:
+                title_html = f"<b>{title}</b>"
+            story.append(Paragraph(title_html, styles["article_title"]))
 
             # Publication date
             if article.get("date"):
-                date_run = doc.add_paragraph(article["date"]).runs
-                if date_run:
-                    date_run[0].italic = True
+                story.append(Paragraph(article["date"], styles["article_date"]))
 
             # Featured image
             if article.get("image_url"):
-                _embed_image(doc, article["image_url"])
+                img = _fetch_image(article["image_url"])
+                if img:
+                    story.append(img)
+                    story.append(Spacer(1, 4))
 
-            # 300-word content excerpt
+            # 300-word content
             if article.get("content"):
-                doc.add_paragraph(article["content"])
+                safe_content = (
+                    article["content"]
+                    .replace("&", "&amp;")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;")
+                )
+                story.append(Paragraph(safe_content, styles["article_body"]))
 
-            # Spacer between articles
-            doc.add_paragraph()
+            story.append(Spacer(1, 8))
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"News_Digest_{run_date.strftime('%Y%m%d')}.docx"
+        story.append(Spacer(1, 12))
+
     try:
-        doc.save(str(output_path))
+        doc = SimpleDocTemplate(
+            str(output_path),
+            pagesize=A4,
+            leftMargin=_MARGIN,
+            rightMargin=_MARGIN,
+            topMargin=_MARGIN,
+            bottomMargin=_MARGIN,
+            title="Daily Tech News Digest",
+            author="NXP Agent",
+        )
+        doc.build(story)
         logger.info("Document saved: %s", output_path)
-    except OSError as exc:
-        raise DocumentBuildError(
-            f"Failed to save document {output_path}: {exc}"
-        ) from exc
+    except Exception as exc:
+        raise DocumentBuildError(f"Failed to save document {output_path}: {exc}") from exc
 
     return output_path
 
@@ -339,18 +416,6 @@ async def run_pipeline(settings: Settings) -> DigestRunResult:
         len(seen_urls),
     )
 
-    # First-run date filter: on initial run, only keep articles from last N days
-    if is_first_run and new_articles:
-        logger.info("First run detected. Applying lookback filter (%d days).", settings.lookback_days)
-        new_articles = [
-            a for a in new_articles if _is_within_lookback(a.get("date"), settings.lookback_days)
-        ]
-        logger.info(
-            "After lookback filter: %d articles within last %d days.",
-            len(new_articles),
-            settings.lookback_days,
-        )
-
     if not new_articles:
         logger.info("No new articles found. Saving state.")
         today_str = run_date.isoformat()
@@ -361,6 +426,25 @@ async def run_pipeline(settings: Settings) -> DigestRunResult:
             sources_processed=len(listing_results),
             document_path=None,
             errors=[],
+        )
+
+    # First run: populate state with discovered URLs and exit — no doc built.
+    # Next run will treat anything new since today as genuinely new articles.
+    if is_first_run:
+        logger.info(
+            "First run: saving %d article URLs to state. Run again tomorrow to get the digest.",
+            len(new_articles),
+        )
+        today_str = run_date.isoformat()
+        for article in new_articles:
+            seen_urls[article["url"]] = today_str
+        save_state(state_path, seen_urls, today_str)
+        return DigestRunResult(
+            run_date=run_date,
+            total_articles=len(new_articles),
+            sources_processed=len(listing_results),
+            document_path=None,
+            errors=errors,
         )
 
     # Stage 4: Scrape each new article page
