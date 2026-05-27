@@ -17,18 +17,24 @@ from typing import Any
 import httpx
 from PIL import Image as PILImage
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
+    BaseDocTemplate,
+    Frame,
     HRFlowable,
     Image as RLImage,
+    KeepTogether,
     PageBreak,
+    PageTemplate,
     Paragraph,
-    SimpleDocTemplate,
     Spacer,
 )
+from reportlab.platypus.tableofcontents import TableOfContents
 
 from app.exceptions import DocumentBuildError, StatePersistenceError
 from app.infra.firecrawl import FirecrawlClient
@@ -140,14 +146,87 @@ def _is_within_lookback(date_str: str | None, lookback_days: int) -> bool:
 _PAGE_W, _PAGE_H = A4
 _MARGIN = 0.75 * inch
 
+# Use Arial (Unicode) when available on Windows; fall back to built-in Helvetica.
+_FONT = "Helvetica"
+_FONT_BOLD = "Helvetica-Bold"
+_FONT_ITALIC = "Helvetica-Oblique"
+try:
+    pdfmetrics.registerFont(TTFont("_NxpArial", "C:/Windows/Fonts/Arial.ttf"))
+    pdfmetrics.registerFont(TTFont("_NxpArial-Bold", "C:/Windows/Fonts/Arialbd.ttf"))
+    pdfmetrics.registerFont(TTFont("_NxpArial-Italic", "C:/Windows/Fonts/Ariali.ttf"))
+    _FONT = "_NxpArial"
+    _FONT_BOLD = "_NxpArial-Bold"
+    _FONT_ITALIC = "_NxpArial-Italic"
+except Exception:
+    pass  # Helvetica Latin-1 fallback
+
+# Map common Unicode characters that Helvetica cannot render to ASCII equivalents.
+_UNICODE_MAP = str.maketrans({
+    "\u2019": "'",  "\u2018": "'",
+    "\u201c": '"',  "\u201d": '"',
+    "\u2013": "-",  "\u2014": "--",
+    "\u2022": "*",  "\u2026": "...",
+    "\u00ae": "(R)","\u2122": "(TM)",
+    "\u00a0": " ",  "\u00ad": "",
+    "\u2011": "-",  "\u2010": "-",
+    "\u00b7": ".",
+})
+
+
+def _clean(text: str) -> str:
+    """Replace problematic Unicode characters and XML-escape for reportlab markup."""
+    return (
+        text.translate(_UNICODE_MAP)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+class _DigestTemplate(BaseDocTemplate):
+    """BaseDocTemplate subclass that wires source headings into the TOC."""
+
+    def afterFlowable(self, flowable: Any) -> None:
+        """Bookmark heading paragraphs and emit TOC entry notifications.
+
+        Handles both bare Paragraphs and Paragraphs nested inside a
+        KeepTogether block (where the heading is bundled with the first
+        article to prevent orphaned headings at the bottom of a page).
+        """
+        candidates = (
+            flowable._flowables
+            if isinstance(flowable, KeepTogether)
+            else [flowable]
+        )
+        for f in candidates:
+            if isinstance(f, Paragraph):
+                key = getattr(f, "_bookmark_key", None)
+                if key:
+                    self.canv.bookmarkPage(key)
+                    self.notify("TOCEntry", (0, f.getPlainText(), self.page, key))
+
+
+def _draw_page_footer(canvas: Any, doc: Any) -> None:
+    """Draw a centred page number in the footer of every page."""
+    canvas.saveState()
+    canvas.setFont(_FONT, 9)
+    canvas.setFillColor(colors.HexColor("#999999"))
+    canvas.drawCentredString(
+        doc.leftMargin + doc.width / 2,
+        doc.bottomMargin - 0.35 * inch,
+        str(canvas.getPageNumber()),
+    )
+    canvas.restoreState()
+
 
 def _get_styles() -> dict[str, ParagraphStyle]:
-    """Build and return the paragraph styles used in the PDF digest."""
+    """Build and return paragraph styles for the PDF digest."""
     base = getSampleStyleSheet()
     return {
         "cover_title": ParagraphStyle(
             "cover_title",
             parent=base["Title"],
+            fontName=_FONT_BOLD,
             fontSize=28,
             leading=34,
             textColor=colors.HexColor("#1a1a2e"),
@@ -157,49 +236,72 @@ def _get_styles() -> dict[str, ParagraphStyle]:
         "cover_sub": ParagraphStyle(
             "cover_sub",
             parent=base["Normal"],
+            fontName=_FONT,
             fontSize=13,
-            leading=16,
+            leading=18,
             textColor=colors.HexColor("#444444"),
             alignment=TA_CENTER,
             spaceAfter=6,
         ),
+        "toc_title": ParagraphStyle(
+            "toc_title",
+            parent=base["Normal"],
+            fontName=_FONT_BOLD,
+            fontSize=14,
+            leading=18,
+            textColor=colors.HexColor("#1a1a2e"),
+            spaceBefore=12,
+            spaceAfter=6,
+        ),
+        "toc_entry": ParagraphStyle(
+            "toc_entry",
+            parent=base["Normal"],
+            fontName=_FONT,
+            fontSize=11,
+            leading=18,
+            leftIndent=0,
+            rightIndent=36,
+            spaceBefore=2,
+            textColor=colors.HexColor("#0057b7"),
+        ),
         "source_heading": ParagraphStyle(
             "source_heading",
             parent=base["Heading1"],
-            fontSize=16,
+            fontName=_FONT_BOLD,
+            fontSize=15,
             leading=20,
             textColor=colors.HexColor("#1a1a2e"),
-            spaceBefore=18,
-            spaceAfter=6,
-            borderPad=4,
+            spaceBefore=20,
+            spaceAfter=4,
         ),
         "article_title": ParagraphStyle(
             "article_title",
             parent=base["Normal"],
-            fontSize=12,
+            fontName=_FONT_BOLD,
+            fontSize=11,
             leading=16,
             textColor=colors.HexColor("#0057b7"),
             spaceBefore=10,
-            spaceAfter=3,
-            fontName="Helvetica-Bold",
+            spaceAfter=2,
         ),
         "article_date": ParagraphStyle(
             "article_date",
             parent=base["Normal"],
+            fontName=_FONT_ITALIC,
             fontSize=9,
             leading=12,
             textColor=colors.HexColor("#888888"),
             spaceAfter=4,
-            fontName="Helvetica-Oblique",
         ),
         "article_body": ParagraphStyle(
             "article_body",
             parent=base["Normal"],
+            fontName=_FONT,
             fontSize=10,
-            leading=14,
+            leading=15,
             textColor=colors.HexColor("#222222"),
-            spaceAfter=8,
-            alignment=TA_LEFT,
+            spaceAfter=6,
+            alignment=TA_JUSTIFY,
         ),
     }
 
@@ -237,8 +339,12 @@ def _build_document(
 ) -> Path:
     """Build the PDF news digest.
 
-    Article titles are rendered as clickable hyperlinks pointing to the
-    original article URL.
+    Features:
+    - First page: cover + clickable table of contents with page numbers.
+    - Each article block is kept together on one page where it fits.
+    - Article titles are clickable hyperlinks to the source URL.
+    - Body text is justified.
+    - Page numbers in the footer of every page.
 
     Args:
         articles_by_source: Articles grouped by source/company name.
@@ -258,8 +364,8 @@ def _build_document(
     total = sum(len(v) for v in articles_by_source.values())
     story: list[Any] = []
 
-    # Cover page
-    story.append(Spacer(1, 1.5 * inch))
+    # --- Cover + TOC on first page ---
+    story.append(Spacer(1, 1.2 * inch))
     story.append(Paragraph("DAILY TECH NEWS DIGEST", styles["cover_title"]))
     story.append(Paragraph(run_date.strftime("%A, %B %d, %Y"), styles["cover_sub"]))
     story.append(
@@ -268,63 +374,78 @@ def _build_document(
             styles["cover_sub"],
         )
     )
+    story.append(Spacer(1, 0.4 * inch))
+    story.append(Paragraph("Contents", styles["toc_title"]))
+    story.append(Spacer(1, 0.1 * inch))
+    toc = TableOfContents()
+    toc.levelStyles = [styles["toc_entry"]]
+    story.append(toc)
     story.append(PageBreak())
 
-    # Articles grouped by source
+    # --- Articles grouped by source ---
     for source_name, articles in articles_by_source.items():
-        story.append(
-            Paragraph(f"{source_name} ({len(articles)} articles)", styles["source_heading"])
+        # Unique bookmark key for this source section
+        key = "src_" + source_name.lower().replace(" ", "_").replace("/", "_").replace(".", "_")
+
+        heading_para = Paragraph(
+            _clean(f"{source_name}  ({len(articles)} articles)"),
+            styles["source_heading"],
         )
-        story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#cccccc"), spaceAfter=6))
+        heading_para._bookmark_key = key  # type: ignore[attr-defined]
+        hr = HRFlowable(width="100%", thickness=1, color=colors.HexColor("#dddddd"), spaceAfter=4)
 
-        for article in articles:
+        for i, article in enumerate(articles):
             url = article.get("url", "")
-            title = article.get("title", "Untitled").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            title = _clean(article.get("title", "Untitled"))
+            title_html = (
+                f'<link href="{url}" color="#0057b7"><b>{title}</b></link>'
+                if url
+                else f"<b>{title}</b>"
+            )
 
-            # Clickable title — opens article URL on click
-            if url:
-                title_html = f'<link href="{url}" color="#0057b7"><b>{title}</b></link>'
-            else:
-                title_html = f"<b>{title}</b>"
-            story.append(Paragraph(title_html, styles["article_title"]))
+            # For the first article, lead with the source heading + rule so the
+            # heading is never left stranded at the bottom of a page without content.
+            block: list[Any] = ([heading_para, hr] if i == 0 else [])
+            block.append(Paragraph(title_html, styles["article_title"]))
 
-            # Publication date
             if article.get("date"):
-                story.append(Paragraph(article["date"], styles["article_date"]))
+                block.append(Paragraph(_clean(article["date"]), styles["article_date"]))
 
-            # Featured image
             if article.get("image_url"):
                 img = _fetch_image(article["image_url"])
                 if img:
-                    story.append(img)
-                    story.append(Spacer(1, 4))
+                    block.append(img)
+                    block.append(Spacer(1, 4))
 
-            # 300-word content
             if article.get("content"):
-                safe_content = (
-                    article["content"]
-                    .replace("&", "&amp;")
-                    .replace("<", "&lt;")
-                    .replace(">", "&gt;")
-                )
-                story.append(Paragraph(safe_content, styles["article_body"]))
+                block.append(Paragraph(_clean(article["content"]), styles["article_body"]))
 
-            story.append(Spacer(1, 8))
+            block.append(Spacer(1, 10))
+            story.append(KeepTogether(block))
 
-        story.append(Spacer(1, 12))
+        story.append(Spacer(1, 6))
 
     try:
-        doc = SimpleDocTemplate(
+        doc = _DigestTemplate(
             str(output_path),
             pagesize=A4,
             leftMargin=_MARGIN,
             rightMargin=_MARGIN,
             topMargin=_MARGIN,
-            bottomMargin=_MARGIN,
+            bottomMargin=_MARGIN + 0.3 * inch,
             title="Daily Tech News Digest",
             author="NXP Agent",
         )
-        doc.build(story)
+        frame = Frame(
+            doc.leftMargin,
+            doc.bottomMargin,
+            doc.width,
+            doc.height,
+            id="normal",
+        )
+        doc.addPageTemplates([PageTemplate(id="All", frames=[frame], onPage=_draw_page_footer)])
+        # multiBuild is required: first pass collects page numbers, second pass fills TOC
+        doc.multiBuild(story)
         logger.info("Document saved: %s", output_path)
     except Exception as exc:
         raise DocumentBuildError(f"Failed to save document {output_path}: {exc}") from exc
