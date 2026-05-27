@@ -47,7 +47,7 @@ cp .env.example .env
 uv run app/run.py
 ```
 
-Output PDF is saved to `output_docs/News_Digest_YYYYMMDD.pdf`.
+Output PDF is saved to `output_docs/News_Digest_DD_MM_YYYY.pdf`.
 
 ### Option 2 — FastAPI server
 

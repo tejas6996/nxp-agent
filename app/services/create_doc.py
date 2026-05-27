@@ -358,7 +358,7 @@ def _build_document(
         DocumentBuildError: If the document cannot be saved.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"News_Digest_{run_date.strftime('%Y%m%d')}.pdf"
+    output_path = output_dir / f"News_Digest_{run_date.strftime('%d_%m_%Y')}.pdf"
 
     styles = _get_styles()
     total = sum(len(v) for v in articles_by_source.values())
