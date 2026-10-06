@@ -60,6 +60,16 @@ class Settings(BaseSettings):
     # How often a site that needed Firecrawl is re-tried with a free direct fetch.
     direct_recheck_days: int = Field(default=7, alias="DIRECT_RECHECK_DAYS")
 
+    # Press-release writer ("Create press release" button)
+    press_release_model: str = Field(default="", alias="PRESS_RELEASE_MODEL")  # empty = OPENAI_MODEL
+    press_release_reasoning_effort: str = Field(
+        default="medium", alias="PRESS_RELEASE_REASONING_EFFORT"
+    )
+    press_release_guidelines_file: str = Field(
+        default="press_release_guidelines.md", alias="PRESS_RELEASE_GUIDELINES_FILE"
+    )
+    press_release_byline: str = Field(default="EEHerald News Desk", alias="PRESS_RELEASE_BYLINE")
+
     # Web UI: optional automatic runs while the UI server is running, e.g. "08:00,12:00,16:00,20:00"
     auto_run_times: str = Field(default="", alias="AUTO_RUN_TIMES")
 

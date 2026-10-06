@@ -37,6 +37,19 @@ def _run_check(pattern: str, allow_firecrawl: bool) -> int:
     return 0
 
 
+def _run_press_release(url: str) -> int:
+    from app.services.press_release import PressReleaseError, generate_press_release, to_markdown
+
+    try:
+        draft = asyncio.run(generate_press_release(url, get_settings()))
+    except PressReleaseError as exc:
+        print(f"Could not write the article: {exc.message}")
+        return 1
+    print(to_markdown(draft))
+    print(f"Saved: output_docs/press_releases/{draft.id}.md  (OpenAI ${draft.openai_cost_usd:.4f})")
+    return 0
+
+
 def main() -> None:
     """Entry point for the standalone pipeline runner."""
     parser = argparse.ArgumentParser(description="NXP news digest pipeline")
@@ -45,6 +58,11 @@ def main() -> None:
         metavar="SITES",
         help="Preview extraction for sites whose name/URL contains any of these "
         "comma-separated words (or 'all'). Does not change state or build a PDF.",
+    )
+    parser.add_argument(
+        "--press-release",
+        metavar="URL",
+        help="Write an EE Herald-style article from the press release at URL and print it.",
     )
     parser.add_argument(
         "--allow-firecrawl",
@@ -59,6 +77,8 @@ def main() -> None:
 
     if args.check:
         sys.exit(_run_check(args.check, args.allow_firecrawl))
+    if args.press_release:
+        sys.exit(_run_press_release(args.press_release))
 
     logger.info("Starting news digest pipeline (standalone mode).")
     try:

@@ -16,7 +16,8 @@ SITES: list[dict[str, str]] = [
     {"name": "Trendforce", "url": "https://www.trendforce.com/presscenter/news"},
     {"name": "STMicroelectronics", "url": "https://newsroom.st.com/"},
     {"name": "Yole Group", "url": "https://www.yolegroup.com/technology-press-release/press-releases/"},
-    {"name": "Canalys", "url": "https://www.canalys.com/newsroom"},
+    # Canalys is now part of Omdia; canalys.com/newsroom stopped publishing in Sept 2025.
+    {"name": "Omdia (incl. Canalys)", "url": "https://omdia.tech.informa.com/pr"},
     {"name": "ABI Research", "url": "https://www.abiresearch.com/press/"},
     {"name": "SEMI", "url": "https://www.semi.org/en/news-media-press/semi-press-releases"},
     {"name": "Intel", "url": "https://newsroom.intel.com/"},

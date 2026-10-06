@@ -268,3 +268,48 @@ def test_token_usage_cost() -> None:
         price_input_per_m=0.10, price_cached_input_per_m=0.01, price_output_per_m=0.50,
     )
     assert usage.cost_usd == pytest.approx(0.08 + 0.002 + 0.05)
+
+
+def test_press_release_fact_check() -> None:
+    from app.services.press_release import fact_check
+
+    source = (
+        "Acme today launched the X100, a 20,000-unit run with 96% efficiency at 1.1 MHz. "
+        '"Our customers need more efficient power conversion," said Jane Doe, CEO. '
+        '"The X100 delivers it in a smaller footprint."'
+    )
+    clean = [
+        "Acme has introduced the X100, offering 96% efficiency at 1.1 MHz across 20000 units.",
+        "Jane Doe, CEO, said: “Our customers need more efficient power conversion. "
+        "The X100 delivers it in a smaller footprint.”",
+    ]
+    assert fact_check(clean, "Acme Launches X100", source) == []
+
+    invented = [
+        "Acme has introduced the X100 with 98% efficiency at 2.4 MHz.",
+        "Jane Doe said: “This is the most efficient converter ever built by anyone.”",
+    ]
+    warnings = fact_check(invented, "Acme Launches X100", source)
+    assert any("98" in w and "2.4" in w for w in warnings)
+    assert any("Quotation" in w for w in warnings)
+
+
+def test_press_release_markdown_and_storage(tmp_path: Path) -> None:
+    from app.models import PressReleaseDraft
+    from app.services.press_release import find_draft_for_url, list_drafts, save_draft, to_markdown
+
+    draft = PressReleaseDraft(
+        id="20261007_093000_acme-launches-x100",
+        created_at=datetime(2026, 10, 7, 9, 30),
+        headline="Acme Launches X100",
+        section="new-products",
+        tags=["Power Electronics"],
+        paragraphs=["First paragraph.", "Second paragraph."],
+        word_count=4,
+        source_url="https://acme.com/news/x100",
+    )
+    md = to_markdown(draft)
+    assert "# Acme Launches X100" in md and "October 7, 2026" in md
+    save_draft(draft, tmp_path)
+    assert [d.id for d in list_drafts(tmp_path)] == [draft.id]
+    assert find_draft_for_url("http://www.acme.com/news/x100/", tmp_path).id == draft.id

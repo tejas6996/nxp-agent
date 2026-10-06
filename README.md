@@ -50,7 +50,8 @@ uv run app/serve.py --host 0.0.0.0   # also reachable from colleagues' computers
 | Tab | What you can do |
 |---|---|
 | **Dashboard** | **Run now** button, live progress log, last run summary (new articles, failed sources, OpenAI cost, Firecrawl credits left), open the latest PDF, problems from the last run |
-| **Articles** | Search and filter all recent articles (last 24 h – 1 year) by source; copy one or many (title, link, summary), or download a selection as JSON (e.g. for press-release drafting) |
+| **Articles** | Search and filter all recent articles (last 24 h – 1 year) by source; copy one or many, download a selection as JSON, and **Create press release** for any article |
+| **Press releases** | Write an EE Herald article from any press-release link, and open/copy/download all articles written so far |
 | **Runs & digests** | Every run with duration, new articles, failures, Firecrawl credits and exact OpenAI cost; monthly totals; links to every PDF / JSON / run report |
 | **Sources** | All newsrooms with how they are read (RSS / direct / Firecrawl), last result and last success; **Preview** any site (nothing is saved) |
 | **Settings & costs** | Current configuration and how costs arise |
@@ -118,6 +119,19 @@ Only one run can use the state file at a time; a second run started meanwhile ex
 - At the start of each run the live balance is read (free). The run may spend `(remaining − reserve) ÷ (runs left in the billing period)`, capped at `FIRECRAWL_MAX_CREDITS_PER_RUN`. Spending is therefore spread evenly over the month and never runs out early.
 - Newsrooms that need Firecrawl are re-scraped at most every `FIRECRAWL_LISTING_COOLDOWN_HOURS`; when credits are short, the sites that waited longest go first.
 - Typical usage: ~2–10 credits per run.
+
+---
+
+## Press releases (EE Herald articles)
+
+Click **Create press release** on an article (Articles tab), or paste any press-release link in the **Press releases** tab. In 10–40 seconds you get an article in EE Herald's house style — headline, byline, lead, technical detail, quotes, availability — ready to copy (formatted or plain text) or download (.txt / .html).
+
+- **Style rules** live in [`press_release_guidelines.md`](press_release_guidelines.md) (with two published EE Herald articles as examples). Edit that file to change the style; no code change or restart is needed.
+- **Accuracy:** the writer only uses the source press release. Afterwards every figure and quotation in the draft is checked against the source; anything not found is shown in a yellow **Check before publishing** box.
+- **Source text:** the source page is re-read live (free); if that fails, the text saved in the digest is used; Firecrawl (1 credit) is a last resort.
+- Drafts are saved in `output_docs/press_releases/` (JSON + Markdown). Clicking the button again opens the saved draft; **Regenerate** writes a new version.
+- Command line: `uv run app/run.py --press-release <URL>`
+- Cost: about **$0.001 per article** (gpt-6-luna, medium reasoning).
 
 ---
 

@@ -425,6 +425,12 @@ def _render_text(root: Tag) -> str:
                 continue
             if not isinstance(child, Tag):
                 continue
+            if child.name in ("td", "th"):
+                # Keep spec tables readable: one row per line, cells separated by " | ".
+                cell = collapse_ws(child.get_text(" ", strip=True))
+                if cell:
+                    parts.append(cell + " | ")
+                continue
             is_block = child.name in _BLOCK_TAGS
             if is_block:
                 parts.append("\n")
@@ -433,7 +439,7 @@ def _render_text(root: Tag) -> str:
                 parts.append("\n")
 
     walk(root)
-    lines = [collapse_ws(line) for line in "".join(parts).split("\n")]
+    lines = [collapse_ws(line).rstrip(" |") for line in "".join(parts).split("\n")]
     return "\n".join(line for line in lines if line)
 
 

@@ -48,11 +48,17 @@ class OpenAIClient:
     exact API cost.
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> None:
         # The SDK retries 429/5xx/connection errors with exponential backoff.
-        self._client = AsyncOpenAI(api_key=settings.openai_api_key, max_retries=5, timeout=180)
-        self._model = settings.openai_model
-        self._reasoning_effort = settings.openai_reasoning_effort.strip().lower()
+        self._client = AsyncOpenAI(api_key=settings.openai_api_key, max_retries=5, timeout=300)
+        self.model = model or settings.openai_model
+        effort = settings.openai_reasoning_effort if reasoning_effort is None else reasoning_effort
+        self._reasoning_effort = effort.strip().lower()
         self.usage = TokenUsage(
             price_input_per_m=settings.openai_price_input_per_m,
             price_cached_input_per_m=settings.openai_price_cached_input_per_m,
@@ -99,7 +105,7 @@ class OpenAIClient:
             kwargs["reasoning_effort"] = self._reasoning_effort
         try:
             response = await self._client.chat.completions.create(
-                model=self._model,
+                model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_content},

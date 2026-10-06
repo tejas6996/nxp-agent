@@ -62,6 +62,30 @@ class ArticleIssue(BaseModel):
     problem: str
 
 
+class PressReleaseDraft(BaseModel):
+    """An article written in EE Herald house style from a source press release."""
+
+    id: str
+    created_at: datetime
+    headline: str
+    section: Literal["news", "new-products"]
+    tags: list[str] = Field(default_factory=list)
+    summary: str = ""  # one-sentence standfirst / meta description
+    paragraphs: list[str] = Field(default_factory=list)
+    byline: str = "EEHerald News Desk"
+    word_count: int = 0
+    read_minutes: int = 1
+    source_title: str = ""
+    source_url: str
+    source_name: Optional[str] = None
+    source_published_date: Optional[str] = None
+    source_fetched_via: Optional[str] = None
+    model: str = ""
+    openai_cost_usd: float = 0.0
+    # Figures / quotes in the draft that could not be found in the source text.
+    warnings: list[str] = Field(default_factory=list)
+
+
 class DigestRunResult(BaseModel):
     """Result of a single pipeline run."""
 

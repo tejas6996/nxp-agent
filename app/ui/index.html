@@ -91,6 +91,16 @@
   .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; font-size: 13.5px; }
   .kv div:nth-child(odd) { color: var(--muted); }
   code { background: var(--info-soft); padding: 1px 6px; border-radius: 5px; font-size: 12.5px; }
+  .pr-article { max-width: 760px; margin: 0 auto; }
+  .pr-section { color: var(--accent); font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+  .pr-article h1 { font-size: 26px; line-height: 1.25; margin: 6px 0 8px; }
+  .pr-byline { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+  .pr-article p { font-size: 15.5px; line-height: 1.7; margin: 0 0 14px; }
+  .pr-warn { background: var(--warn-soft); color: var(--warn); border-radius: 10px; padding: 10px 14px; margin-bottom: 16px; font-size: 13.5px; }
+  .pr-warn ul { margin: 6px 0 0; padding-left: 18px; }
+  .pr-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 18px; }
+  .pr-foot { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 8px; font-size: 13px; color: var(--muted); }
+  .modal.wide { max-width: 980px; }
   .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--panel);
     padding: 8px 16px; border-radius: 8px; font-weight: 600; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 30; }
   .toast.show { opacity: 1; }
@@ -108,6 +118,7 @@
   <nav id="tabs">
     <button data-tab="dashboard" class="active">Dashboard</button>
     <button data-tab="articles">Articles</button>
+    <button data-tab="press">Press releases</button>
     <button data-tab="runs">Runs &amp; digests</button>
     <button data-tab="sources">Sources</button>
     <button data-tab="settings">Settings &amp; costs</button>
@@ -158,6 +169,26 @@
       </div>
       <div class="muted" id="a-count" style="margin-bottom:6px"></div>
       <div id="a-list"></div>
+    </div>
+  </section>
+
+  <!-- PRESS RELEASES -->
+  <section id="tab-press" class="tab">
+    <div class="card">
+      <h3>Write an EE Herald article</h3>
+      <p class="muted" style="margin-top:0">Click <b>Create press release</b> on any article in the <b>Articles</b> tab, or paste the link of any press release here.
+        The article follows the house style in <code>press_release_guidelines.md</code> (edit that file to change the style).</p>
+      <div class="toolbar">
+        <input type="text" id="pr-url" placeholder="https://company.com/news/press-release..." style="flex:1 1 420px">
+        <button class="btn primary" id="pr-create" type="button">Create press release</button>
+      </div>
+    </div>
+    <div class="card section">
+      <h3>Written articles</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Created</th><th>Headline</th><th>Source</th><th class="num">Words</th><th>Check</th><th></th></tr></thead>
+        <tbody id="pr-body"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody>
+      </table></div>
     </div>
   </section>
 
@@ -275,6 +306,7 @@ $("tabs").addEventListener("click", (e) => {
   if (b.dataset.tab === "articles") loadArticles();
   if (b.dataset.tab === "runs") loadRuns();
   if (b.dataset.tab === "sources") loadSources();
+  if (b.dataset.tab === "press") loadDrafts();
 });
 
 /* ---------- status / live log ---------- */
@@ -442,6 +474,7 @@ function renderArticles() {
         <div class="meta"><span class="pill">${esc(a.source_name)}</span><span>${esc(a.published_date || "no date")}</span>
           ${a.summary ? "" : '<span class="pill warn">title + link only</span>'}
           <button class="linkish" data-copy="${i}" type="button">Copy</button></div>
+        <div style="margin:2px 0 6px"><button class="btn small${draftsByUrl[urlKey(a.url)] ? "" : " primary"}" data-pr="${i}" type="button">${draftsByUrl[urlKey(a.url)] ? "View press release" : "Create press release"}</button></div>
         ${a.summary ? `<div class="sum clamp" data-sum>${esc(a.summary).replace(/\n+/g, "<br>")}</div>
           <button class="linkish" data-more type="button">Show more</button>` : ""}
       </div>
@@ -452,6 +485,8 @@ const articleText = (a) => `${a.title}\n${a.url}\n${a.source_name} · ${a.publis
 $("a-list").addEventListener("click", (e) => {
   const more = e.target.closest("[data-more]");
   if (more) { const s = more.previousElementSibling; s.classList.toggle("clamp"); more.textContent = s.classList.contains("clamp") ? "Show more" : "Show less"; return; }
+  const prBtn = e.target.closest("[data-pr]");
+  if (prBtn) { const a = filteredArticles()[+prBtn.dataset.pr]; openPressRelease(a.url, false, a.title, a.source_name); return; }
   const copy = e.target.closest("[data-copy]");
   if (copy) { navigator.clipboard.writeText(articleText(filteredArticles()[+copy.dataset.copy])).then(() => toast("Copied")); }
 });
@@ -522,10 +557,89 @@ async function preview(names, allowFirecrawl) {
         ${s.articles.length > 40 ? `<div class="muted">…and ${s.articles.length - 40} more</div>` : ""}</div>`).join("");
   } catch (e) { $("modal-sub").textContent = ""; $("modal-body").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
 }
-function openModal(title, sub, body) { $("modal-title").textContent = title; $("modal-sub").textContent = sub; $("modal-body").innerHTML = body; $("modal").classList.add("open"); }
+function openModal(title, sub, body, wide) { $("modal-title").textContent = title; $("modal-sub").textContent = sub; $("modal-body").innerHTML = body;
+  document.querySelector("#modal .modal").classList.toggle("wide", !!wide); $("modal").classList.add("open"); }
 $("modal-close").addEventListener("click", () => $("modal").classList.remove("open"));
 $("modal").addEventListener("click", (e) => { if (e.target.id === "modal") $("modal").classList.remove("open"); });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("modal").classList.remove("open"); });
+
+/* ---------- press releases ---------- */
+let draftsByUrl = {}, draftsCache = [];
+const urlKey = (u) => { try { const x = new URL(u); return (x.hostname.replace(/^www\./, "") + x.pathname.replace(/\/+$/, "") + x.search).toLowerCase(); } catch (_) { return u; } };
+const prDate = (iso) => new Date(iso).toLocaleDateString("en-US", {month: "long", day: "numeric", year: "numeric"});
+const hostOf = (u) => { try { return new URL(u).hostname; } catch (_) { return u; } };
+
+async function loadDrafts() {
+  try { draftsCache = await api("/press-releases"); } catch (e) { $("pr-body").innerHTML = `<tr><td colspan="6" class="empty">${esc(e.message)}</td></tr>`; return; }
+  draftsByUrl = {};
+  for (const d of draftsCache) if (!draftsByUrl[urlKey(d.source_url)]) draftsByUrl[urlKey(d.source_url)] = d.id;
+  $("pr-body").innerHTML = draftsCache.length ? draftsCache.map((d) => `<tr>
+      <td style="white-space:nowrap">${esc(fmtDate(d.created_at))}</td>
+      <td><a href="#" data-open="${esc(d.id)}">${esc(d.headline)}</a></td>
+      <td>${esc(d.source_name || hostOf(d.source_url))}</td>
+      <td class="num">${d.word_count}</td>
+      <td>${d.warnings ? `<span class="pill warn">${d.warnings} to verify</span>` : '<span class="pill ok">OK</span>'}</td>
+      <td><button class="btn small" data-open="${esc(d.id)}" type="button">Open</button></td></tr>`).join("")
+    : '<tr><td colspan="6" class="empty">No articles written yet.</td></tr>';
+}
+$("pr-body").addEventListener("click", async (e) => {
+  const o = e.target.closest("[data-open]"); if (!o) return; e.preventDefault();
+  openModal("EE Herald article", "", '<div class="empty"><span class="spin"></span></div>', true);
+  try { showDraft(await api(`/press-releases/${encodeURIComponent(o.dataset.open)}`)); } catch (err) { $("modal-body").innerHTML = `<div class="pr-warn">${esc(err.message)}</div>`; }
+});
+$("pr-create").addEventListener("click", () => { const u = $("pr-url").value.trim(); if (u) openPressRelease(u, false); });
+$("pr-url").addEventListener("keydown", (e) => { if (e.key === "Enter") $("pr-create").click(); });
+
+async function openPressRelease(url, regenerate, title, sourceName) {
+  openModal(regenerate ? "Rewriting article…" : "Writing article…", title || url,
+    '<div class="empty"><span class="spin"></span><div style="margin-top:10px">Reading the source and writing in EE Herald style – usually 15–40 seconds.</div></div>', true);
+  try {
+    const d = await api("/press-releases", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({url, regenerate: !!regenerate, source_title: title || null, source_name: sourceName || null})});
+    showDraft(d);
+    loadDrafts().then(() => { if (document.querySelector("#tabs .active")?.dataset.tab === "articles") renderArticles(); });
+  } catch (e) {
+    $("modal-title").textContent = "Could not write the article";
+    $("modal-body").innerHTML = `<div class="pr-warn">${esc(e.message)}</div>`;
+  }
+}
+
+const draftText = (d) => `${d.headline}\n\nBy ${d.byline} | ${prDate(d.created_at)} | ${d.read_minutes} min read\n\n${d.paragraphs.join("\n\n")}\n`;
+const draftHtml = (d) => `<h1>${esc(d.headline)}</h1>\n<p><em>By ${esc(d.byline)} | ${esc(prDate(d.created_at))} | ${d.read_minutes} min read</em></p>\n` +
+  d.paragraphs.map((p) => `<p>${esc(p)}</p>`).join("\n");
+
+function showDraft(d) {
+  const section = d.section === "new-products" ? "New Products" : "News";
+  $("modal-title").textContent = "EE Herald article";
+  $("modal-sub").textContent = `${d.word_count} words · ${d.model} · ${money(d.openai_cost_usd)} · source read via ${d.source_fetched_via || "–"}`;
+  document.querySelector("#modal .modal").classList.add("wide");
+  $("modal-body").innerHTML = `
+    <div class="pr-actions">
+      <button class="btn primary small" id="pr-copy-rich" type="button">Copy (formatted)</button>
+      <button class="btn small" id="pr-copy-text" type="button">Copy plain text</button>
+      <a class="btn small" href="${API}/press-releases/${encodeURIComponent(d.id)}/download?format=txt">Download .txt</a>
+      <a class="btn small" href="${API}/press-releases/${encodeURIComponent(d.id)}/download?format=html">Download .html</a>
+      <button class="btn small" id="pr-regen" type="button">Regenerate</button>
+    </div>
+    ${d.warnings.length ? `<div class="pr-warn"><b>Check before publishing</b> – not found in the source text:<ul>${d.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></div>` : ""}
+    <article class="pr-article">
+      <div class="pr-section">${section}${d.tags.length ? " · " + d.tags.map(esc).join(" · ") : ""}</div>
+      <h1>${esc(d.headline)}</h1>
+      <div class="pr-byline">By ${esc(d.byline)} | ${esc(prDate(d.created_at))} | ${d.read_minutes} min read</div>
+      ${d.paragraphs.map((p) => `<p>${esc(p)}</p>`).join("")}
+      <div class="pr-foot">Teaser: ${esc(d.summary)}<br>Source: <a href="${safeUrl(d.source_url)}" target="_blank" rel="noopener">${esc(d.source_title || d.source_url)}</a>${d.source_name ? " (" + esc(d.source_name) + ")" : ""}</div>
+    </article>`;
+  $("pr-copy-text").onclick = () => navigator.clipboard.writeText(draftText(d)).then(() => toast("Copied"));
+  $("pr-copy-rich").onclick = async () => {
+    try {
+      await navigator.clipboard.write([new ClipboardItem({
+        "text/html": new Blob([draftHtml(d)], {type: "text/html"}),
+        "text/plain": new Blob([draftText(d)], {type: "text/plain"})})]);
+      toast("Copied with formatting");
+    } catch (_) { navigator.clipboard.writeText(draftText(d)).then(() => toast("Copied")); }
+  };
+  $("pr-regen").onclick = () => openPressRelease(d.source_url, true, d.source_title, d.source_name);
+}
 
 /* ---------- settings ---------- */
 async function loadConfig() {
@@ -554,11 +668,18 @@ function refreshAll() { loadRuns(); loadCredits(); const t = document.querySelec
   if (t === "articles") loadArticles(); if (t === "sources") loadSources(); }
 
 (function initialTab() {
+  const m = location.hash.match(/^#draft=([\w-]+)$/);
+  if (m) {
+    document.querySelector('#tabs [data-tab="press"]').click();
+    openModal("EE Herald article", "", '<div class="empty"><span class="spin"></span></div>', true);
+    api(`/press-releases/${m[1]}`).then(showDraft).catch((e) => { $("modal-body").innerHTML = `<div class="pr-warn">${esc(e.message)}</div>`; });
+    return;
+  }
   let t = location.hash.slice(1);
   if (!t) { try { t = localStorage.getItem("nd-tab"); } catch (_) {} }
   if (t) document.querySelector(`#tabs [data-tab="${CSS.escape(t)}"]`)?.click();
 })();
-loadRuns(); loadCredits(); loadConfig(); pollStatus();
+loadDrafts(); loadRuns(); loadCredits(); loadConfig(); pollStatus();
 </script>
 </body>
 </html>
