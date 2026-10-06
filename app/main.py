@@ -7,6 +7,7 @@ and attaches global exception handlers.
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -31,7 +32,24 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 configure_logging(settings.log_level)
 
-_UI_FILE = Path(__file__).parent / "ui" / "index.html"
+_APP_DIR = Path(__file__).parent
+_UI_FILE = _APP_DIR / "ui" / "index.html"
+
+
+def _code_fingerprint() -> str:
+    """Fingerprint of the Python code on disk (changes after edits or a `git pull`)."""
+    digest = hashlib.sha1()
+    for path in sorted(_APP_DIR.rglob("*.py")):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        digest.update(f"{path.relative_to(_APP_DIR)}:{stat.st_size}:{stat.st_mtime_ns}".encode())
+    return digest.hexdigest()[:12]
+
+
+# The code this server process is actually running.
+_STARTUP_FINGERPRINT = _code_fingerprint()
 
 
 @contextlib.asynccontextmanager
@@ -62,6 +80,16 @@ def create_app() -> FastAPI:
     @app.get("/", include_in_schema=False)
     async def ui() -> FileResponse:
         return FileResponse(_UI_FILE, media_type="text/html")
+
+    @app.get("/api/v1/version", include_in_schema=False)
+    async def version() -> dict[str, object]:
+        """Lets the UI warn when the code was updated but the server wasn't restarted."""
+        on_disk = _code_fingerprint()
+        return {
+            "running": _STARTUP_FINGERPRINT,
+            "on_disk": on_disk,
+            "outdated": on_disk != _STARTUP_FINGERPRINT,
+        }
 
     # Routers
     app.include_router(health_router)

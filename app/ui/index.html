@@ -125,6 +125,10 @@
   </nav>
 </header>
 
+<div id="restart-banner" style="display:none;background:var(--warn-soft);color:var(--warn);border-bottom:1px solid var(--border)">
+  <div class="bar" style="padding:10px 16px;font-weight:600">The tool was updated, but the UI server is still running the old version.
+    Close the server window (or press Ctrl+C in it) and start <code>Start News Digest UI.bat</code> again, then reload this page.</div>
+</div>
 <main>
   <!-- DASHBOARD -->
   <section id="tab-dashboard" class="tab active">
@@ -599,8 +603,9 @@ async function openPressRelease(url, regenerate, title, sourceName) {
     showDraft(d);
     loadDrafts().then(() => { if (document.querySelector("#tabs .active")?.dataset.tab === "articles") renderArticles(); });
   } catch (e) {
+    const outdated = e.message === "Not Found" && await checkVersion();
     $("modal-title").textContent = "Could not write the article";
-    $("modal-body").innerHTML = `<div class="pr-warn">${esc(e.message)}</div>`;
+    $("modal-body").innerHTML = `<div class="pr-warn">${esc(outdated ? RESTART_MSG : e.message)}</div>`;
   }
 }
 
@@ -641,6 +646,20 @@ function showDraft(d) {
   $("pr-regen").onclick = () => openPressRelease(d.source_url, true, d.source_title, d.source_name);
 }
 
+/* ---------- outdated-server check ---------- */
+const RESTART_MSG = "The UI server is running an older version of the tool. Close the server window (or press Ctrl+C in it), start 'Start News Digest UI.bat' again, then reload this page.";
+async function checkVersion() {
+  let outdated = false;
+  try {
+    const res = await fetch(API + "/version");
+    if (res.status === 404) outdated = true;          // server older than this page
+    else if (res.ok) outdated = (await res.json()).outdated;
+  } catch (_) { /* server down: the status pill already shows it */ }
+  $("restart-banner").style.display = outdated ? "block" : "none";
+  return outdated;
+}
+setInterval(checkVersion, 60000);
+
 /* ---------- settings ---------- */
 async function loadConfig() {
   try {
@@ -679,7 +698,7 @@ function refreshAll() { loadRuns(); loadCredits(); const t = document.querySelec
   if (!t) { try { t = localStorage.getItem("nd-tab"); } catch (_) {} }
   if (t) document.querySelector(`#tabs [data-tab="${CSS.escape(t)}"]`)?.click();
 })();
-loadDrafts(); loadRuns(); loadCredits(); loadConfig(); pollStatus();
+checkVersion(); loadDrafts(); loadRuns(); loadCredits(); loadConfig(); pollStatus();
 </script>
 </body>
 </html>
