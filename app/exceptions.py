@@ -31,4 +31,8 @@ class ArticleExtractionError(AppBaseException):
 
 
 class DocumentBuildError(AppBaseException):
-    """Raised when the Word document cannot be generated."""
+    """Raised when the digest document cannot be generated."""
+
+
+class PipelineBusyError(AppBaseException):
+    """Raised when another pipeline run already holds the state lock."""

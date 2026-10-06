@@ -1,20 +1,17 @@
 """
-Main pipeline orchestrator and Word document builder.
+Digest document builders: the PDF news digest and its machine-readable JSON twin.
 
-This module is the primary entrypoint called by both the FastAPI /run
-endpoint and the standalone app/run.py script.
+The JSON export carries the full cleaned article text so downstream tools (for example a
+future agent that drafts press releases) can consume each run's articles directly.
 """
 
-import asyncio
 import json
 import logging
-from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-import httpx
 from PIL import Image as PILImage
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
@@ -27,121 +24,21 @@ from reportlab.platypus import (
     BaseDocTemplate,
     Frame,
     HRFlowable,
-    Image as RLImage,
     KeepTogether,
     PageBreak,
     PageTemplate,
     Paragraph,
     Spacer,
 )
+from reportlab.platypus import (
+    Image as RLImage,
+)
 from reportlab.platypus.tableofcontents import TableOfContents
 
-from app.exceptions import DocumentBuildError, StatePersistenceError
-from app.infra.firecrawl import FirecrawlClient
-from app.infra.openai import OpenAIClient
-from app.models import DigestRunResult
-from app.services.agent import extract_article_contents, extract_articles_from_listings
-from app.services.crawling import scrape_articles, scrape_listing_pages
-from app.settings import Settings
-from app.sites import SITES
+from app.exceptions import DocumentBuildError
+from app.models import ArticleContent, DigestRunResult
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# State management
-# ---------------------------------------------------------------------------
-
-
-def load_state(state_path: Path) -> dict[str, Any]:
-    """Load run state from the JSON state file.
-
-    Args:
-        state_path: Path to scraper_state.json.
-
-    Returns:
-        State dict with at minimum a 'seen_urls' key.
-        Returns empty state if the file does not exist.
-
-    Raises:
-        StatePersistenceError: If the file exists but cannot be read or parsed.
-    """
-    if not state_path.exists():
-        logger.info("No state file at %s. Starting with empty state.", state_path)
-        return {"seen_urls": {}}
-    try:
-        with state_path.open("r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError) as exc:
-        raise StatePersistenceError(
-            f"Failed to read state file {state_path}: {exc}"
-        ) from exc
-
-
-def save_state(
-    state_path: Path,
-    seen_urls: dict[str, str],
-    run_date: str,
-) -> None:
-    """Persist run state to the JSON state file.
-
-    Args:
-        state_path: Path to scraper_state.json.
-        seen_urls: Mapping of article URL to the ISO date it was first seen.
-        run_date: ISO date string for the current run.
-
-    Raises:
-        StatePersistenceError: If the file cannot be written.
-    """
-    state = {"last_run_date": run_date, "seen_urls": seen_urls}
-    try:
-        state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
-        logger.info("State saved to %s. Tracking %d URLs.", state_path, len(seen_urls))
-    except OSError as exc:
-        raise StatePersistenceError(
-            f"Failed to write state file {state_path}: {exc}"
-        ) from exc
-
-
-def _is_within_lookback(date_str: str | None, lookback_days: int) -> bool:
-    """Check if a date string is within the lookback window.
-
-    Args:
-        date_str: Date string (YYYY-MM-DD format preferred; other formats attempted).
-        lookback_days: Number of days to look back from today.
-
-    Returns:
-        True if the date is within the lookback window, False otherwise.
-        Returns True if the date cannot be parsed or is null (benefit of the doubt).
-    """
-    if not date_str:
-        # Cannot determine age — include the article to avoid silently dropping new content
-        return True
-    try:
-        # Try ISO format first
-        article_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-    except ValueError:
-        try:
-            # Try common alternative formats
-            for fmt in ["%B %d, %Y", "%b %d, %Y", "%d-%m-%Y", "%m/%d/%Y"]:
-                try:
-                    article_date = datetime.strptime(date_str, fmt).date()
-                    break
-                except ValueError:
-                    continue
-            else:
-                logger.debug("Could not parse date: %s", date_str)
-                return False
-        except Exception:
-            return False
-
-    cutoff = date.today() - timedelta(days=lookback_days)
-    return article_date >= cutoff
-
-
-# ---------------------------------------------------------------------------
-# Document building helpers
-# ---------------------------------------------------------------------------
 
 _PAGE_W, _PAGE_H = A4
 _MARGIN = 0.75 * inch
@@ -172,6 +69,11 @@ _UNICODE_MAP = str.maketrans({
     "\u00b7": ".",
 })
 
+# Images narrower/shorter than this are icons, logos or avatars, not article images.
+_MIN_IMAGE_W = 200
+_MIN_IMAGE_H = 100
+_MAX_IMAGE_PIXELS_W = 1200
+
 
 def _clean(text: str) -> str:
     """Replace problematic Unicode characters and XML-escape for reportlab markup."""
@@ -180,6 +82,16 @@ def _clean(text: str) -> str:
         .replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
+    )
+
+
+def _escape_attr(value: str) -> str:
+    """Escape a value for use inside a reportlab markup attribute (e.g. a link href)."""
+    return (
+        value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
     )
 
 
@@ -194,7 +106,7 @@ class _DigestTemplate(BaseDocTemplate):
         article to prevent orphaned headings at the bottom of a page).
         """
         candidates = (
-            flowable._flowables
+            getattr(flowable, "_content", [])
             if isinstance(flowable, KeepTogether)
             else [flowable]
         )
@@ -306,36 +218,72 @@ def _get_styles() -> dict[str, ParagraphStyle]:
     }
 
 
-def _fetch_image(image_url: str, max_width: float = 5.0 * inch) -> RLImage | None:
-    """Download an image and return a reportlab Image flowable.
+def prepare_image(data: bytes) -> bytes | None:
+    """Validate downloaded image bytes and re-encode them as a compact JPEG.
 
-    Returns None on any download or format failure so the article is
-    still rendered without an image.
-
-    Args:
-        image_url: URL of the image to download.
-        max_width: Maximum rendered width in points.
+    Returns None for anything that is not a usable article image (icons, tracking pixels,
+    unreadable formats), so the article is still rendered without an image.
     """
     try:
-        response = httpx.get(image_url, timeout=10, follow_redirects=True)
-        response.raise_for_status()
-        data = BytesIO(response.content)
-        pil_img = PILImage.open(data)
-        w, h = pil_img.size
-        aspect = h / w
-        rendered_w = min(max_width, _PAGE_W - 2 * _MARGIN)
-        rendered_h = rendered_w * aspect
-        data.seek(0)
-        return RLImage(data, width=rendered_w, height=rendered_h)
-    except Exception as exc:
-        logger.warning("Failed to embed image from %s: %s", image_url, exc)
+        with PILImage.open(BytesIO(data)) as img:
+            img.load()
+            width, height = img.size
+            if width < _MIN_IMAGE_W or height < _MIN_IMAGE_H:
+                return None
+            if img.mode in ("RGBA", "LA", "P"):
+                rgba = img.convert("RGBA")
+                background = PILImage.new("RGB", rgba.size, (255, 255, 255))
+                background.paste(rgba, mask=rgba.split()[-1])
+                converted = background
+            else:
+                converted = img.convert("RGB")
+            if width > _MAX_IMAGE_PIXELS_W:
+                converted = converted.resize(
+                    (_MAX_IMAGE_PIXELS_W, round(height * _MAX_IMAGE_PIXELS_W / width))
+                )
+            out = BytesIO()
+            converted.save(out, format="JPEG", quality=82, optimize=True)
+            return out.getvalue()
+    except Exception:
         return None
 
 
-def _build_document(
-    articles_by_source: dict[str, list[dict[str, Any]]],
-    output_dir: Path,
-    run_date: date,
+def _image_flowable(data: bytes, max_width: float = 5.0 * inch) -> RLImage | None:
+    try:
+        with PILImage.open(BytesIO(data)) as img:
+            w, h = img.size
+        rendered_w = min(max_width, _PAGE_W - 2 * _MARGIN)
+        rendered_h = rendered_w * h / w
+        max_h = 4.0 * inch
+        if rendered_h > max_h:
+            rendered_w, rendered_h = rendered_w * max_h / rendered_h, max_h
+        return RLImage(BytesIO(data), width=rendered_w, height=rendered_h)
+    except Exception as exc:
+        logger.warning("Failed to embed image: %s", exc)
+        return None
+
+
+def output_paths(output_dir: Path, run_at: datetime) -> tuple[Path, Path]:
+    """Return unique (pdf_path, json_path) for this run.
+
+    The time is part of the name so several runs on the same day never overwrite
+    each other: News_Digest_DD_MM_YYYY_HHMM.pdf
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"News_Digest_{run_at.strftime('%d_%m_%Y_%H%M')}"
+    candidate = stem
+    counter = 2
+    while (output_dir / f"{candidate}.pdf").exists() or (output_dir / f"{candidate}.json").exists():
+        candidate = f"{stem}_{counter}"
+        counter += 1
+    return output_dir / f"{candidate}.pdf", output_dir / f"{candidate}.json"
+
+
+def build_pdf(
+    articles_by_source: dict[str, list[ArticleContent]],
+    images: dict[str, bytes],
+    output_path: Path,
+    run_at: datetime,
 ) -> Path:
     """Build the PDF news digest.
 
@@ -348,8 +296,9 @@ def _build_document(
 
     Args:
         articles_by_source: Articles grouped by source/company name.
-        output_dir: Directory where the .pdf file will be saved.
-        run_date: Date of this pipeline run; used in cover page and filename.
+        images: Prepared JPEG bytes keyed by article URL.
+        output_path: Where the .pdf file will be saved.
+        run_at: Time of this pipeline run; used on the cover page.
 
     Returns:
         Path to the saved .pdf file.
@@ -357,9 +306,6 @@ def _build_document(
     Raises:
         DocumentBuildError: If the document cannot be saved.
     """
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"News_Digest_{run_date.strftime('%d_%m_%Y')}.pdf"
-
     styles = _get_styles()
     total = sum(len(v) for v in articles_by_source.values())
     story: list[Any] = []
@@ -367,7 +313,7 @@ def _build_document(
     # --- Cover + TOC on first page ---
     story.append(Spacer(1, 1.2 * inch))
     story.append(Paragraph("DAILY TECH NEWS DIGEST", styles["cover_title"]))
-    story.append(Paragraph(run_date.strftime("%A, %B %d, %Y"), styles["cover_sub"]))
+    story.append(Paragraph(run_at.strftime("%A, %B %d, %Y"), styles["cover_sub"]))
     story.append(
         Paragraph(
             f"{total} new articles across {len(articles_by_source)} sources",
@@ -383,9 +329,8 @@ def _build_document(
     story.append(PageBreak())
 
     # --- Articles grouped by source ---
-    for source_name, articles in articles_by_source.items():
-        # Unique bookmark key for this source section
-        key = "src_" + source_name.lower().replace(" ", "_").replace("/", "_").replace(".", "_")
+    for index, (source_name, articles) in enumerate(articles_by_source.items()):
+        key = f"src_{index}"
 
         heading_para = Paragraph(
             _clean(f"{source_name}  ({len(articles)} articles)"),
@@ -395,10 +340,10 @@ def _build_document(
         hr = HRFlowable(width="100%", thickness=1, color=colors.HexColor("#dddddd"), spaceAfter=4)
 
         for i, article in enumerate(articles):
-            url = article.get("url", "")
-            title = _clean(article.get("title", "Untitled"))
+            url = article.url
+            title = _clean(article.title or "Untitled")
             title_html = (
-                f'<link href="{url}" color="#0057b7"><b>{title}</b></link>'
+                f'<link href="{_escape_attr(url)}" color="#0057b7"><b>{title}</b></link>'
                 if url
                 else f"<b>{title}</b>"
             )
@@ -408,17 +353,20 @@ def _build_document(
             block: list[Any] = ([heading_para, hr] if i == 0 else [])
             block.append(Paragraph(title_html, styles["article_title"]))
 
-            if article.get("date"):
-                block.append(Paragraph(_clean(article["date"]), styles["article_date"]))
+            if article.published_date:
+                block.append(Paragraph(_clean(article.published_date), styles["article_date"]))
 
-            if article.get("image_url"):
-                img = _fetch_image(article["image_url"])
+            image_data = images.get(url)
+            if image_data:
+                img = _image_flowable(image_data)
                 if img:
                     block.append(img)
                     block.append(Spacer(1, 4))
 
-            if article.get("content"):
-                block.append(Paragraph(_clean(article["content"]), styles["article_body"]))
+            if article.summary:
+                for para in article.summary.split("\n"):
+                    if para.strip():
+                        block.append(Paragraph(_clean(para.strip()), styles["article_body"]))
 
             block.append(Spacer(1, 10))
             story.append(KeepTogether(block))
@@ -426,6 +374,7 @@ def _build_document(
         story.append(Spacer(1, 6))
 
     try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         doc = _DigestTemplate(
             str(output_path),
             pagesize=A4,
@@ -448,163 +397,107 @@ def _build_document(
         doc.multiBuild(story)
         logger.info("Document saved: %s", output_path)
     except Exception as exc:
+        output_path.unlink(missing_ok=True)
         raise DocumentBuildError(f"Failed to save document {output_path}: {exc}") from exc
 
     return output_path
 
 
-# ---------------------------------------------------------------------------
-# Pipeline orchestrator
-# ---------------------------------------------------------------------------
+def write_json(
+    articles: list[ArticleContent], result: DigestRunResult, output_path: Path
+) -> Path:
+    """Write the run's articles and metadata as JSON (input for downstream agents).
 
-
-async def run_pipeline(settings: Settings) -> DigestRunResult:
-    """Execute the full news scraping and digest generation pipeline.
-
-    Stages:
-        1. Load state (seen URLs).
-        2. Scrape all listing pages concurrently via Firecrawl.
-        2b. Re-scrape redirect URLs for hub pages that returned no articles.
-        3. Filter out URLs already present in seen_urls.
-        4. Scrape each new article page concurrently via Firecrawl.
-        5. Extract 300-word content and image per article via GPT.
-        6. Build Word document grouped by source.
-        7. Save updated state (only on reaching this point).
-
-    Args:
-        settings: Application settings instance.
-
-    Returns:
-        DigestRunResult summarising the run.
+    Raises:
+        DocumentBuildError: If the file cannot be written.
     """
-    run_date = date.today()
-    errors: list[str] = []
-    state_path = Path(settings.state_file)
-
-    state = load_state(state_path)
-    seen_urls: dict[str, str] = state.get("seen_urls", {})
-    last_run_date = state.get("last_run_date")
-    is_first_run = last_run_date is None
-
-    firecrawl = FirecrawlClient(settings)
-    openai = OpenAIClient(settings)
-    firecrawl_semaphore = asyncio.Semaphore(settings.max_concurrent_requests)
-    openai_semaphore = asyncio.Semaphore(settings.max_concurrent_openai)
-
-    # Stage 1: Scrape listing pages
-    logger.info("Stage 1: Scraping %d listing pages.", len(SITES))
-    listing_results = await scrape_listing_pages(firecrawl, SITES, firecrawl_semaphore)
-    logger.info(
-        "Stage 1 complete. Scraped %d/%d listing pages.", len(listing_results), len(SITES)
-    )
-
-    # Stage 2: GPT extract article lists from each listing
-    logger.info("Stage 2: Extracting article lists from listing pages.")
-    all_articles, redirect_hints = await extract_articles_from_listings(
-        openai, listing_results, openai_semaphore
-    )
-    logger.info("Stage 2 complete. Found %d articles across all sources.", len(all_articles))
-
-    # Stage 2b: Re-scrape sites that returned a redirect URL (hub/nav pages)
-    if redirect_hints:
-        logger.info(
-            "Stage 2b: Following redirect hints for %d sites.", len(redirect_hints)
-        )
-        redirect_sites = [
-            {"name": r["source_name"], "url": r["redirect_url"]} for r in redirect_hints
-        ]
-        redirect_listings = await scrape_listing_pages(firecrawl, redirect_sites, firecrawl_semaphore)
-        redirect_articles, _ = await extract_articles_from_listings(
-            openai, redirect_listings, openai_semaphore
-        )
-        logger.info(
-            "Stage 2b complete. Found %d additional articles from redirected pages.",
-            len(redirect_articles),
-        )
-        all_articles.extend(redirect_articles)
-
-    # Stage 3: Filter seen URLs and invalid URLs
-    new_articles = [
-        a
-        for a in all_articles
-        if a.get("url")
-        and a["url"].startswith("http")
-        and a["url"] not in seen_urls
-    ]
-    logger.info(
-        "Stage 3 complete. %d new articles after filtering %d seen URLs.",
-        len(new_articles),
-        len(seen_urls),
-    )
-
-    if not new_articles:
-        logger.info("No new articles found. Saving state.")
-        today_str = run_date.isoformat()
-        save_state(state_path, seen_urls, today_str)
-        return DigestRunResult(
-            run_date=run_date,
-            total_articles=0,
-            sources_processed=len(listing_results),
-            document_path=None,
-            errors=[],
-        )
-
-    # First run: populate state with discovered URLs and exit — no doc built.
-    # Next run will treat anything new since today as genuinely new articles.
-    if is_first_run:
-        logger.info(
-            "First run: saving %d article URLs to state. Run again tomorrow to get the digest.",
-            len(new_articles),
-        )
-        today_str = run_date.isoformat()
-        for article in new_articles:
-            seen_urls[article["url"]] = today_str
-        save_state(state_path, seen_urls, today_str)
-        return DigestRunResult(
-            run_date=run_date,
-            total_articles=len(new_articles),
-            sources_processed=len(listing_results),
-            document_path=None,
-            errors=errors,
-        )
-
-    # Stage 4: Scrape each new article page
-    logger.info("Stage 4: Scraping %d new article pages.", len(new_articles))
-    scraped_articles = await scrape_articles(firecrawl, new_articles, firecrawl_semaphore)
-    logger.info("Stage 4 complete. Scraped %d articles.", len(scraped_articles))
-
-    # Stage 5: GPT extract content from each article
-    logger.info("Stage 5: Extracting content from %d articles.", len(scraped_articles))
-    extracted_articles = await extract_article_contents(openai, scraped_articles, openai_semaphore)
-    logger.info(
-        "Stage 5 complete. Extracted content for %d articles.", len(extracted_articles)
-    )
-
-    # Stage 6: Build Word document
-    logger.info("Stage 6: Building Word document.")
-    articles_by_source: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for article in extracted_articles:
-        articles_by_source[article["source_name"]].append(article)
-
-    doc_path: Path | None = None
+    payload = {
+        "run": result.model_dump(mode="json", exclude={"site_reports"}),
+        "articles": [a.model_dump(mode="json") for a in articles],
+    }
     try:
-        doc_path = _build_document(
-            dict(articles_by_source), Path(settings.output_dir), run_date
-        )
-    except DocumentBuildError as exc:
-        logger.error("Document build failed: %s", exc)
-        errors.append(str(exc))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    except OSError as exc:
+        raise DocumentBuildError(f"Failed to write {output_path}: {exc}") from exc
+    logger.info("JSON export saved: %s", output_path)
+    return output_path
 
-    # Stage 7: Save state
-    today_str = run_date.isoformat()
-    for article in extracted_articles:
-        seen_urls[article["url"]] = today_str
-    save_state(state_path, seen_urls, today_str)
 
-    return DigestRunResult(
-        run_date=run_date,
-        total_articles=len(extracted_articles),
-        sources_processed=len(listing_results),
-        document_path=str(doc_path) if doc_path else None,
-        errors=errors,
+def write_run_report(result: DigestRunResult, output_dir: Path) -> Path | None:
+    """Write a plain-text report of every source and link that had a problem.
+
+    Written on every run (even when there are no new articles), into
+    <output_dir>/reports/Run_Report_DD_MM_YYYY_HHMM.txt. Returns None if it cannot be
+    written (the problems are also in the log, so this never fails the run).
+    """
+    run_at = result.run_at or datetime.now()
+    reports_dir = output_dir / "reports"
+    path = reports_dir / f"Run_Report_{run_at.strftime('%d_%m_%Y_%H%M%S')}.txt"
+    by_status: dict[str, list[Any]] = {}
+    for report in result.site_reports:
+        by_status.setdefault(report.status, []).append(report)
+
+    lines = [
+        f"News digest run report - {run_at.strftime('%A, %B %d, %Y %H:%M:%S')}",
+        "=" * 72,
+        f"Sources checked:          {len(result.site_reports)}",
+        f"Sources OK:               {result.sources_processed}",
+        f"Sources FAILED:           {len(by_status.get('failed', []))}",
+        f"Sources skipped:          {len(by_status.get('skipped', []))}",
+        f"Sources first scan:       {len(by_status.get('baselined', []))}",
+        f"New articles in digest:   {result.total_articles}",
+        f"Articles without content: {len(result.article_issues)}",
+        f"Firecrawl credits used:   {result.firecrawl_credits_used}",
+        f"OpenAI cost:              ${result.openai_cost_usd:.4f} ({result.openai_calls} calls, "
+        f"{result.openai_input_tokens:,} input / {result.openai_output_tokens:,} output tokens)",
+        f"Duration:                 {result.duration_seconds or 0:.0f}s",
+        f"PDF:  {result.document_path or '-'}",
+        f"JSON: {result.json_path or '-'}",
+        "",
+    ]
+
+    def section(title: str, rows: list[str]) -> None:
+        lines.append(f"{title} ({len(rows)})")
+        lines.append("-" * 72)
+        lines.extend(rows or ["(none)"])
+        lines.append("")
+
+    section(
+        "FAILED SOURCES - no articles could be read; check the URL or add a feed",
+        [f"* {r.source_name}\n    URL:    {r.url}\n    Reason: {r.detail}" for r in by_status.get("failed", [])],
     )
+    section(
+        "ARTICLES WITHOUT CONTENT - included in the digest with title + link only",
+        [f"* [{i.source_name}] {i.title}\n    URL:    {i.url}\n    Reason: {i.problem}" for i in result.article_issues],
+    )
+    section(
+        "SKIPPED SOURCES - not checked this run (will be retried automatically)",
+        [f"* {r.source_name}: {r.detail}" for r in by_status.get("skipped", [])],
+    )
+    section(
+        "ERRORS",
+        list(result.errors),
+    )
+    section(
+        "FIRST SCAN (BASELINE) - existing articles recorded; new ones appear from the next run",
+        [f"* {r.source_name}: {r.articles_found} articles" for r in by_status.get("baselined", [])],
+    )
+    section(
+        "ALL SOURCES",
+        [
+            f"{r.status:<10} {r.method or '-':<10} found={r.articles_found:<4} new={r.new_articles:<3} {r.source_name}"
+            for r in result.site_reports
+        ],
+    )
+    try:
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines), encoding="utf-8")
+        # Machine-readable copy of the run result (run history in the web UI).
+        result.report_path = str(path)
+        path.with_suffix(".json").write_text(result.model_dump_json(indent=2), encoding="utf-8")
+    except OSError as exc:
+        logger.error("Could not write run report %s: %s", path, exc)
+        return None
+    logger.info("Run report saved: %s", path)
+    return path

@@ -1,0 +1,564 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>News Digest</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --panel: #ffffff; --text: #1b1f24; --muted: #667080; --border: #e3e6ea;
+    --accent: #0057b7; --accent-text: #ffffff; --accent-soft: #e6effa;
+    --ok: #1a7f37; --ok-soft: #e3f4e8; --warn: #9a6700; --warn-soft: #fbf1d6;
+    --bad: #c62828; --bad-soft: #fde7e7; --info-soft: #eef1f5;
+    --log-bg: #0f1419; --log-text: #d6dde6;
+    --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1216; --panel: #171b21; --text: #e6e9ee; --muted: #98a2b3; --border: #2a3038;
+      --accent: #4c9aff; --accent-text: #0b1220; --accent-soft: #15253d;
+      --ok: #4ac26b; --ok-soft: #12291a; --warn: #e3b341; --warn-soft: #2e2510;
+      --bad: #f47067; --bad-soft: #341616; --info-soft: #1d232b;
+      --log-bg: #0a0d11; --log-text: #c9d1d9; --shadow: none;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  header { background: var(--panel); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 5; }
+  .bar { max-width: 1240px; margin: 0 auto; padding: 12px 16px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .brand { font-weight: 700; font-size: 17px; margin-right: auto; display: flex; align-items: center; gap: 10px; }
+  .brand small { font-weight: 400; color: var(--muted); font-size: 13px; }
+  nav { max-width: 1240px; margin: 0 auto; padding: 0 16px; display: flex; gap: 4px; overflow-x: auto; }
+  nav button { background: none; border: 0; border-bottom: 2px solid transparent; padding: 10px 12px; color: var(--muted);
+    font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap; }
+  nav button.active { color: var(--accent); border-bottom-color: var(--accent); }
+  main { max-width: 1240px; margin: 0 auto; padding: 20px 16px 60px; }
+  .tab { display: none; } .tab.active { display: block; }
+  .btn { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 7px 14px;
+    font: inherit; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+  .btn:hover { border-color: var(--muted); }
+  .btn.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  .btn.primary:disabled { opacity: .55; cursor: not-allowed; }
+  .btn.small { padding: 3px 9px; font-size: 12.5px; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; font-size: 12.5px; font-weight: 600;
+    background: var(--info-soft); color: var(--muted); white-space: nowrap; }
+  .pill.ok { background: var(--ok-soft); color: var(--ok); } .pill.warn { background: var(--warn-soft); color: var(--warn); }
+  .pill.bad { background: var(--bad-soft); color: var(--bad); } .pill.run { background: var(--accent-soft); color: var(--accent); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+  .pill.run .dot { animation: pulse 1.2s infinite; }
+  @keyframes pulse { 50% { opacity: .25; } }
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; box-shadow: var(--shadow); min-width: 0; }
+  .card h3 { margin: 0 0 10px; font-size: 14px; }
+  .stat .label { color: var(--muted); font-size: 12.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
+  .stat .value { font-size: 26px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .stat .sub { color: var(--muted); font-size: 12.5px; }
+  .row { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+  .section { margin-top: 18px; }
+  .two { display: grid; gap: 14px; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
+  @media (max-width: 900px) { .two { grid-template-columns: minmax(0, 1fr); } }
+  .log { background: var(--log-bg); color: var(--log-text); border-radius: 10px; padding: 10px 12px; height: 380px; overflow: auto;
+    font: 12px/1.55 ui-monospace, Consolas, "Cascadia Mono", Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+  .log .WARNING { color: #e3b341; } .log .ERROR { color: #f47067; }
+  .muted { color: var(--muted); }
+  .empty { color: var(--muted); padding: 18px 4px; text-align: center; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; white-space: nowrap; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .table-wrap { overflow-x: auto; }
+  .issues li { margin-bottom: 8px; } .issues { padding-left: 18px; margin: 0; }
+  .toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+  input[type=text], input[type=search], select { background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 7px 10px; font: inherit; min-width: 0; }
+  input[type=search] { flex: 1 1 260px; }
+  .article { display: grid; grid-template-columns: 24px minmax(0, 1fr) 150px; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--border); }
+  .article:last-child { border-bottom: 0; }
+  .article img { width: 150px; height: 96px; object-fit: cover; border-radius: 8px; background: var(--info-soft); }
+  @media (max-width: 640px) { .article { grid-template-columns: 24px minmax(0, 1fr); } .article img { display: none; } }
+  .article .t { font-weight: 650; font-size: 15px; line-height: 1.35; }
+  .article .meta { color: var(--muted); font-size: 12.5px; margin: 3px 0 6px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .article .sum { color: var(--text); opacity: .9; font-size: 13.5px; }
+  .article .sum.clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .linkish { background: none; border: 0; color: var(--accent); cursor: pointer; padding: 0; font: inherit; font-size: 12.5px; }
+  .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: none; align-items: flex-start; justify-content: center; padding: 40px 16px; z-index: 20; overflow: auto; }
+  .modal-bg.open { display: flex; }
+  .modal { background: var(--panel); border-radius: 14px; width: 100%; max-width: 900px; padding: 18px 20px; border: 1px solid var(--border); }
+  .modal h2 { margin: 0 0 4px; font-size: 18px; }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; font-size: 13.5px; }
+  .kv div:nth-child(odd) { color: var(--muted); }
+  code { background: var(--info-soft); padding: 1px 6px; border-radius: 5px; font-size: 12.5px; }
+  .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--panel);
+    padding: 8px 16px; border-radius: 8px; font-weight: 600; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 30; }
+  .toast.show { opacity: 1; }
+  .spin { width: 14px; height: 14px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: rot .8s linear infinite; }
+  @keyframes rot { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div class="brand">News Digest <small id="brand-sub"></small></div>
+    <span id="status-pill" class="pill"><span class="dot"></span><span>Loading…</span></span>
+    <button id="run-btn" class="btn primary" type="button">Run now</button>
+  </div>
+  <nav id="tabs">
+    <button data-tab="dashboard" class="active">Dashboard</button>
+    <button data-tab="articles">Articles</button>
+    <button data-tab="runs">Runs &amp; digests</button>
+    <button data-tab="sources">Sources</button>
+    <button data-tab="settings">Settings &amp; costs</button>
+  </nav>
+</header>
+
+<main>
+  <!-- DASHBOARD -->
+  <section id="tab-dashboard" class="tab active">
+    <div class="grid">
+      <div class="card stat"><div class="label">Last run</div><div class="value" id="s-last">–</div><div class="sub" id="s-last-sub"></div></div>
+      <div class="card stat"><div class="label">New articles</div><div class="value" id="s-new">–</div><div class="sub" id="s-new-sub"></div></div>
+      <div class="card stat"><div class="label">Sources</div><div class="value" id="s-src">–</div><div class="sub" id="s-src-sub"></div></div>
+      <div class="card stat"><div class="label">OpenAI cost</div><div class="value" id="s-cost">–</div><div class="sub" id="s-cost-sub"></div></div>
+      <div class="card stat"><div class="label">Firecrawl credits</div><div class="value" id="s-credits">–</div><div class="sub" id="s-credits-sub"></div></div>
+    </div>
+
+    <div class="two section">
+      <div class="card">
+        <div class="row" style="justify-content:space-between;margin-bottom:8px">
+          <h3 style="margin:0">Live log</h3>
+          <span class="muted" id="log-hint">Start a run to see progress here.</span>
+        </div>
+        <div class="log" id="log"></div>
+      </div>
+      <div class="card">
+        <h3>Latest digest</h3>
+        <div id="latest-files" class="row" style="margin-bottom:14px"><span class="muted">No digest yet.</span></div>
+        <h3>Problems in the last run</h3>
+        <div id="latest-issues"><span class="muted">–</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ARTICLES -->
+  <section id="tab-articles" class="tab">
+    <div class="card">
+      <div class="toolbar">
+        <input type="search" id="a-search" placeholder="Search titles and summaries…">
+        <select id="a-source"><option value="">All sources</option></select>
+        <select id="a-days">
+          <option value="1">Last 24 hours</option><option value="3">Last 3 days</option>
+          <option value="7" selected>Last 7 days</option><option value="30">Last 30 days</option><option value="365">Last year</option>
+        </select>
+        <button class="btn small" id="a-select-all" type="button">Select all</button>
+        <button class="btn small" id="a-copy" type="button">Copy selected</button>
+        <button class="btn small" id="a-export" type="button">Download selected (JSON)</button>
+      </div>
+      <div class="muted" id="a-count" style="margin-bottom:6px"></div>
+      <div id="a-list"></div>
+    </div>
+  </section>
+
+  <!-- RUNS -->
+  <section id="tab-runs" class="tab">
+    <div class="grid">
+      <div class="card stat"><div class="label">Runs this month</div><div class="value" id="m-runs">–</div></div>
+      <div class="card stat"><div class="label">OpenAI this month</div><div class="value" id="m-cost">–</div><div class="sub">sum of recorded runs</div></div>
+      <div class="card stat"><div class="label">Avg cost per run</div><div class="value" id="m-avg">–</div><div class="sub" id="m-avg-sub"></div></div>
+      <div class="card stat"><div class="label">Firecrawl used this month</div><div class="value" id="m-fc">–</div><div class="sub">credits, recorded runs</div></div>
+    </div>
+    <div class="card section">
+      <h3>Run history</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>When</th><th>By</th><th class="num">Time</th><th class="num">New</th><th class="num">Sources OK</th>
+          <th class="num">Failed</th><th class="num">No content</th><th class="num">Firecrawl</th><th class="num">OpenAI</th><th>Files</th></tr></thead>
+        <tbody id="runs-body"><tr><td colspan="10" class="empty">Loading…</td></tr></tbody>
+      </table></div>
+    </div>
+    <div class="card section">
+      <h3>All digests</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Digest</th><th>Created</th><th class="num">Articles</th><th>Files</th></tr></thead>
+        <tbody id="digests-body"></tbody>
+      </table></div>
+    </div>
+  </section>
+
+  <!-- SOURCES -->
+  <section id="tab-sources" class="tab">
+    <div class="card">
+      <h3>Preview a source</h3>
+      <p class="muted" style="margin-top:0">Shows what would be extracted right now – nothing is saved and no digest is built. Use it after adding or changing a site in <code>app/sites.py</code>.</p>
+      <div class="toolbar">
+        <input type="text" id="c-sites" placeholder="Site names, comma-separated (e.g. Intel, Qualcomm) or 'all'" style="flex:1 1 320px">
+        <label class="row" style="gap:6px"><input type="checkbox" id="c-fc"> allow Firecrawl (uses credits)</label>
+        <button class="btn primary" id="c-btn" type="button">Preview</button>
+      </div>
+    </div>
+    <div class="card section">
+      <div class="toolbar">
+        <h3 style="margin:0;margin-right:auto">Sources (<span id="src-count">0</span>)</h3>
+        <input type="search" id="src-search" placeholder="Filter…" style="flex:0 1 240px">
+        <select id="src-filter">
+          <option value="">All</option><option value="failed">Failed last run</option><option value="skipped">Skipped last run</option>
+          <option value="firecrawl">Needs Firecrawl</option><option value="feed">RSS feed</option><option value="direct">Direct</option>
+        </select>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Source</th><th>Method</th><th>Last run</th><th class="num">New</th><th>Last success</th><th>Details</th><th></th></tr></thead>
+        <tbody id="src-body"></tbody>
+      </table></div>
+    </div>
+  </section>
+
+  <!-- SETTINGS -->
+  <section id="tab-settings" class="tab">
+    <div class="two">
+      <div class="card">
+        <h3>Current configuration</h3>
+        <div class="kv" id="cfg"></div>
+        <p class="muted" style="margin-bottom:0">Change these in the <code>.env</code> file and restart the UI. Automatic runs: set
+          <code>AUTO_RUN_TIMES=08:00,12:00,16:00,20:00</code> – they happen while this UI server is running.</p>
+      </div>
+      <div class="card">
+        <h3>What a run costs</h3>
+        <div id="cost-explain" class="muted">Loading…</div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="modal-bg" id="modal"><div class="modal">
+  <div class="row" style="justify-content:space-between;align-items:flex-start">
+    <div><h2 id="modal-title"></h2><div class="muted" id="modal-sub"></div></div>
+    <button class="btn small" id="modal-close" type="button">Close</button>
+  </div>
+  <div id="modal-body" style="margin-top:12px"></div>
+</div></div>
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+const API = "/api/v1";
+const $ = (id) => document.getElementById(id);
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const safeUrl = (u) => /^https?:\/\//i.test(u || "") ? esc(u) : "#";
+const fileUrl = (rel, dl) => `${API}/files/${rel.split("/").map(encodeURIComponent).join("/")}${dl ? "?download=true" : ""}`;
+const money = (v) => v == null ? "–" : (v < 0.01 && v > 0 ? "$" + v.toFixed(4) : "$" + v.toFixed(v < 1 ? 3 : 2));
+const fmtDate = (iso) => iso ? new Date(iso).toLocaleString([], {month:"short", day:"numeric", hour:"2-digit", minute:"2-digit"}) : "–";
+const ago = (iso) => {
+  if (!iso) return "never";
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (s < 90) return "just now"; if (s < 3600) return Math.round(s/60) + " min ago";
+  if (s < 86400) return Math.round(s/3600) + " h ago"; return Math.round(s/86400) + " d ago";
+};
+async function api(path, opts) {
+  const res = await fetch(API + path, opts);
+  if (!res.ok) {
+    let msg = res.statusText;
+    try { msg = (await res.json()).detail || msg; } catch (_) {}
+    throw new Error(msg);
+  }
+  return res.json();
+}
+function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add("show"); setTimeout(() => t.classList.remove("show"), 2200); }
+
+/* ---------- tabs ---------- */
+$("tabs").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-tab]"); if (!b) return;
+  document.querySelectorAll("#tabs button").forEach((x) => x.classList.toggle("active", x === b));
+  document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x.id === "tab-" + b.dataset.tab));
+  try { localStorage.setItem("nd-tab", b.dataset.tab); } catch (_) {}
+  if (location.hash !== "#" + b.dataset.tab) history.replaceState(null, "", "#" + b.dataset.tab);
+  if (b.dataset.tab === "articles") loadArticles();
+  if (b.dataset.tab === "runs") loadRuns();
+  if (b.dataset.tab === "sources") loadSources();
+});
+
+/* ---------- status / live log ---------- */
+let logSeq = 0, wasRunning = false, pollTimer = null;
+const statusPill = (cls, text) => { const p = $("status-pill"); p.className = "pill " + cls; p.lastElementChild.textContent = text; };
+
+async function pollStatus() {
+  clearTimeout(pollTimer);
+  let st;
+  try { st = await api(`/status?since=${logSeq}`); }
+  catch (e) { statusPill("bad", "Server unreachable"); pollTimer = setTimeout(pollStatus, 5000); return; }
+
+  const log = $("log");
+  if (st.seq < logSeq) { log.textContent = ""; logSeq = 0; }
+  if (st.log.length) {
+    const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
+    for (const entry of st.log) {
+      const div = document.createElement("div"); div.className = entry.level; div.textContent = entry.line; log.appendChild(div);
+    }
+    logSeq = st.seq;
+    if (atBottom) log.scrollTop = log.scrollHeight;
+    $("log-hint").textContent = st.running ? "Running…" : (st.finished_at ? "Finished " + fmtDate(st.finished_at) : "");
+  }
+
+  $("run-btn").disabled = st.running || st.locked_by_other_run;
+  if (st.running) { statusPill("run", "Running" + (st.trigger === "scheduled" ? " (scheduled)" : "")); $("run-btn").innerHTML = '<span class="spin"></span> Running…'; }
+  else {
+    $("run-btn").textContent = "Run now";
+    if (st.locked_by_other_run) statusPill("warn", "Run in progress elsewhere");
+    else if (st.error) statusPill("bad", "Last run failed");
+    else statusPill("ok", "Idle");
+  }
+  const sched = st.schedule || {};
+  $("brand-sub").textContent = sched.next ? "next automatic run " + fmtDate(sched.next) : "";
+
+  if (wasRunning && !st.running) {
+    toast(st.error ? "Run failed – see log" : "Run finished");
+    refreshAll();
+  }
+  wasRunning = st.running;
+  pollTimer = setTimeout(pollStatus, st.running ? 1500 : 8000);
+}
+
+$("run-btn").addEventListener("click", async () => {
+  $("run-btn").disabled = true;
+  try { await api("/runs", {method: "POST"}); $("log").textContent = ""; logSeq = 0; toast("Run started"); }
+  catch (e) { toast(e.message); }
+  pollStatus();
+});
+
+/* ---------- dashboard ---------- */
+let runsCache = [];
+let digestsCache = [];
+function renderDashboard(runs) {
+  const r = runs[0];
+  if (!r) { $("s-last").textContent = "No runs yet"; }
+  if (!r) return renderLatestFilesOnly();
+  $("s-last").textContent = ago(r.run_at);
+  $("s-last-sub").textContent = `${fmtDate(r.run_at)} · ${r.trigger || "–"} · ${Math.round(r.duration_seconds || 0)}s`;
+  $("s-new").textContent = r.total_articles;
+  $("s-new-sub").textContent = r.total_articles ? `${(r.article_issues || []).length} without content` : "nothing new";
+  const failed = (r.failed_sources || []).length;
+  $("s-src").textContent = `${r.sources_processed} OK`;
+  $("s-src-sub").innerHTML = failed ? `<span style="color:var(--bad)">${failed} failed</span>` : "no failures";
+  $("s-cost").textContent = money(r.openai_cost_usd);
+  const month = new Date().toISOString().slice(0, 7);
+  const monthCost = runs.filter((x) => (x.run_at || "").startsWith(month)).reduce((a, x) => a + (x.openai_cost_usd || 0), 0);
+  $("s-cost-sub").textContent = `last run · ${money(monthCost)} this month`;
+
+  const files = [];
+  const latest = digestsCache.find((d) => d.pdf);
+  if (latest) {
+    files.push(`<a class="btn small" href="${fileUrl(latest.pdf)}" target="_blank" rel="noopener">Open PDF</a>`);
+    if (latest.json) files.push(`<a class="btn small" href="${fileUrl(latest.json, true)}">JSON</a>`);
+    files.push(`<span class="muted">${esc(fmtDate(latest.modified))}${latest.articles != null ? " · " + latest.articles + " articles" : ""}</span>`);
+  }
+  if (r.report_file) files.push(`<a class="btn small" href="${fileUrl(r.report_file)}" target="_blank" rel="noopener">Last run report</a>`);
+  $("latest-files").innerHTML = files.join("") || '<span class="muted">No digest yet.</span>';
+
+  const issues = [];
+  for (const f of r.failed_sources || []) issues.push(`<li><span class="pill bad">source failed</span> ${esc(f)}</li>`);
+  for (const i of r.article_issues || []) issues.push(`<li><span class="pill warn">no content</span> <a href="${safeUrl(i.url)}" target="_blank" rel="noopener">${esc(i.title)}</a> <span class="muted">– ${esc(i.problem)}</span></li>`);
+  for (const e of r.errors || []) issues.push(`<li><span class="pill bad">error</span> ${esc(e)}</li>`);
+  $("latest-issues").innerHTML = issues.length ? `<ul class="issues">${issues.join("")}</ul>` : '<span class="pill ok">No problems</span>';
+}
+
+async function loadCredits() {
+  try {
+    const c = await api("/credits");
+    if (!c.available) { $("s-credits").textContent = "n/a"; $("s-credits-sub").textContent = "Firecrawl not configured"; return; }
+    $("s-credits").textContent = c.remaining.toLocaleString();
+    $("s-credits-sub").textContent = `remaining · resets in ${c.days_left ?? "?"} days`;
+  } catch (e) { $("s-credits").textContent = "?"; $("s-credits-sub").textContent = e.message; }
+}
+
+/* ---------- runs ---------- */
+function renderLatestFilesOnly() {
+  const latest = digestsCache.find((d) => d.pdf);
+  if (latest) $("latest-files").innerHTML = `<a class="btn small" href="${fileUrl(latest.pdf)}" target="_blank" rel="noopener">Open PDF</a>
+    <span class="muted">${esc(fmtDate(latest.modified))}</span>`;
+}
+async function loadRuns() {
+  try { digestsCache = await api("/digests"); } catch (_) { digestsCache = []; }
+  try { runsCache = await api("/runs"); } catch (e) { $("runs-body").innerHTML = `<tr><td colspan="10" class="empty">${esc(e.message)}</td></tr>`; return; }
+  renderDashboard(runsCache);
+  const fileLinks = (r) => [
+    r.pdf_file ? `<a href="${fileUrl(r.pdf_file)}" target="_blank" rel="noopener">PDF</a>` : "",
+    r.json_file ? `<a href="${fileUrl(r.json_file, true)}">JSON</a>` : "",
+    r.report_file ? `<a href="${fileUrl(r.report_file)}" target="_blank" rel="noopener">Report</a>` : "",
+  ].filter(Boolean).join(" · ");
+  $("runs-body").innerHTML = runsCache.length ? runsCache.map((r) => `<tr>
+      <td>${esc(fmtDate(r.run_at))}</td><td>${esc(r.trigger || "–")}</td>
+      <td class="num">${Math.round(r.duration_seconds || 0)}s</td><td class="num">${r.total_articles}</td>
+      <td class="num">${r.sources_processed}</td>
+      <td class="num">${(r.failed_sources || []).length ? `<span style="color:var(--bad)">${r.failed_sources.length}</span>` : 0}</td>
+      <td class="num">${(r.article_issues || []).length}</td><td class="num">${r.firecrawl_credits_used}</td>
+      <td class="num">${money(r.openai_cost_usd)}</td><td>${fileLinks(r)}</td></tr>`).join("")
+    : '<tr><td colspan="10" class="empty">No runs recorded yet.</td></tr>';
+
+  const month = new Date().toISOString().slice(0, 7);
+  const m = runsCache.filter((x) => (x.run_at || "").startsWith(month));
+  const cost = m.reduce((a, x) => a + (x.openai_cost_usd || 0), 0);
+  const priced = runsCache.filter((x) => x.openai_calls != null);
+  $("m-runs").textContent = m.length;
+  $("m-cost").textContent = money(cost);
+  $("m-avg").textContent = priced.length ? money(priced.reduce((a, x) => a + (x.openai_cost_usd || 0), 0) / priced.length) : "–";
+  $("m-avg-sub").textContent = priced.length ? `over ${priced.length} runs` : "";
+  $("m-fc").textContent = m.reduce((a, x) => a + (x.firecrawl_credits_used || 0), 0);
+
+  try {
+    const d = digestsCache;
+    $("digests-body").innerHTML = d.length ? d.map((x) => `<tr><td>${esc(x.name)}</td><td>${esc(fmtDate(x.modified))}</td>
+      <td class="num">${x.articles ?? "–"}</td><td>${[
+        x.pdf ? `<a href="${fileUrl(x.pdf)}" target="_blank" rel="noopener">PDF</a>` : "",
+        x.json ? `<a href="${fileUrl(x.json, true)}">JSON</a>` : ""].filter(Boolean).join(" · ")}</td></tr>`).join("")
+      : '<tr><td colspan="4" class="empty">No digests yet.</td></tr>';
+  } catch (e) { $("digests-body").innerHTML = `<tr><td colspan="4" class="empty">${esc(e.message)}</td></tr>`; }
+}
+
+/* ---------- articles ---------- */
+let articles = [], selected = new Set();
+async function loadArticles() {
+  $("a-list").innerHTML = '<div class="empty">Loading…</div>';
+  try { articles = await api(`/articles?days=${$("a-days").value}`); }
+  catch (e) { $("a-list").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const sources = [...new Set(articles.map((a) => a.source_name))].sort();
+  const cur = $("a-source").value;
+  $("a-source").innerHTML = '<option value="">All sources</option>' + sources.map((s) => `<option${s === cur ? " selected" : ""}>${esc(s)}</option>`).join("");
+  selected = new Set([...selected].filter((u) => articles.some((a) => a.url === u)));
+  renderArticles();
+}
+function filteredArticles() {
+  const q = $("a-search").value.trim().toLowerCase(), src = $("a-source").value;
+  return articles.filter((a) => (!src || a.source_name === src) &&
+    (!q || (a.title + " " + (a.summary || "") + " " + a.source_name).toLowerCase().includes(q)));
+}
+function renderArticles() {
+  const list = filteredArticles();
+  $("a-count").textContent = `${list.length} article${list.length === 1 ? "" : "s"} · ${selected.size} selected`;
+  if (!list.length) { $("a-list").innerHTML = '<div class="empty">No articles in this period. Run the digest or widen the time range.</div>'; return; }
+  $("a-list").innerHTML = list.map((a, i) => `<div class="article">
+      <input type="checkbox" data-url="${esc(a.url)}" ${selected.has(a.url) ? "checked" : ""} aria-label="Select article">
+      <div>
+        <div class="t"><a href="${safeUrl(a.url)}" target="_blank" rel="noopener">${esc(a.title)}</a></div>
+        <div class="meta"><span class="pill">${esc(a.source_name)}</span><span>${esc(a.published_date || "no date")}</span>
+          ${a.summary ? "" : '<span class="pill warn">title + link only</span>'}
+          <button class="linkish" data-copy="${i}" type="button">Copy</button></div>
+        ${a.summary ? `<div class="sum clamp" data-sum>${esc(a.summary).replace(/\n+/g, "<br>")}</div>
+          <button class="linkish" data-more type="button">Show more</button>` : ""}
+      </div>
+      ${a.image_url ? `<img src="${safeUrl(a.image_url)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.visibility='hidden'">` : "<div></div>"}
+    </div>`).join("");
+}
+const articleText = (a) => `${a.title}\n${a.url}\n${a.source_name} · ${a.published_date || ""}\n\n${a.summary || ""}`.trim();
+$("a-list").addEventListener("click", (e) => {
+  const more = e.target.closest("[data-more]");
+  if (more) { const s = more.previousElementSibling; s.classList.toggle("clamp"); more.textContent = s.classList.contains("clamp") ? "Show more" : "Show less"; return; }
+  const copy = e.target.closest("[data-copy]");
+  if (copy) { navigator.clipboard.writeText(articleText(filteredArticles()[+copy.dataset.copy])).then(() => toast("Copied")); }
+});
+$("a-list").addEventListener("change", (e) => {
+  if (e.target.dataset.url) { e.target.checked ? selected.add(e.target.dataset.url) : selected.delete(e.target.dataset.url); renderArticles(); }
+});
+$("a-search").addEventListener("input", renderArticles);
+$("a-source").addEventListener("change", renderArticles);
+$("a-days").addEventListener("change", loadArticles);
+$("a-select-all").addEventListener("click", () => {
+  const list = filteredArticles(); const all = list.every((a) => selected.has(a.url));
+  list.forEach((a) => all ? selected.delete(a.url) : selected.add(a.url)); renderArticles();
+});
+const selectedArticles = () => articles.filter((a) => selected.has(a.url));
+$("a-copy").addEventListener("click", () => {
+  const s = selectedArticles(); if (!s.length) return toast("Select articles first");
+  navigator.clipboard.writeText(s.map(articleText).join("\n\n---\n\n")).then(() => toast(`Copied ${s.length} articles`));
+});
+$("a-export").addEventListener("click", () => {
+  const s = selectedArticles(); if (!s.length) return toast("Select articles first");
+  const blob = new Blob([JSON.stringify({exported_at: new Date().toISOString(), articles: s}, null, 2)], {type: "application/json"});
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+  a.download = `selected_articles_${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-")}.json`; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+
+/* ---------- sources ---------- */
+let sourcesCache = [];
+const statusClass = {ok: "ok", unchanged: "ok", baselined: "", skipped: "warn", failed: "bad"};
+async function loadSources() {
+  try { sourcesCache = await api("/sources"); } catch (e) { $("src-body").innerHTML = `<tr><td colspan="7" class="empty">${esc(e.message)}</td></tr>`; return; }
+  renderSources();
+}
+function renderSources() {
+  const q = $("src-search").value.trim().toLowerCase(), f = $("src-filter").value;
+  const rows = sourcesCache.filter((s) => (!q || (s.name + s.url).toLowerCase().includes(q)) &&
+    (!f || s.last_status === f || s.method === f || (f === "feed" && s.feed)));
+  $("src-count").textContent = sourcesCache.length;
+  $("src-body").innerHTML = rows.map((s) => `<tr>
+      <td><a href="${safeUrl(s.url)}" target="_blank" rel="noopener">${esc(s.name)}</a>${s.feed ? ' <span class="pill" title="RSS feed configured">RSS</span>' : ""}</td>
+      <td>${s.method ? `<span class="pill${s.method === "firecrawl" ? " warn" : ""}">${esc(s.method)}</span>` : '<span class="muted">–</span>'}</td>
+      <td>${s.last_status ? `<span class="pill ${statusClass[s.last_status] || ""}">${esc(s.last_status)}</span>` : '<span class="muted">–</span>'}</td>
+      <td class="num">${s.last_new_articles ?? "–"}</td>
+      <td>${esc(ago(s.last_success_at))}</td>
+      <td class="muted" style="max-width:360px">${esc(s.last_detail || "")}</td>
+      <td><button class="btn small" data-preview="${esc(s.name)}" type="button">Preview</button></td></tr>`).join("")
+    || '<tr><td colspan="7" class="empty">No matching sources.</td></tr>';
+}
+$("src-search").addEventListener("input", renderSources);
+$("src-filter").addEventListener("change", renderSources);
+$("src-body").addEventListener("click", (e) => { const b = e.target.closest("[data-preview]"); if (b) preview(b.dataset.preview, false); });
+$("c-btn").addEventListener("click", () => { const v = $("c-sites").value.trim(); if (v) preview(v, $("c-fc").checked); });
+$("c-sites").addEventListener("keydown", (e) => { if (e.key === "Enter") $("c-btn").click(); });
+
+async function preview(names, allowFirecrawl) {
+  openModal("Preview: " + names, "Fetching and extracting… this can take up to a minute.", '<div class="empty"><span class="spin"></span></div>');
+  try {
+    const r = await api("/check", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({sites: names, allow_firecrawl: allowFirecrawl})});
+    $("modal-sub").textContent = `OpenAI ${money(r.openai_cost_usd)} · Firecrawl ${r.firecrawl_credits_used} credits · nothing saved`;
+    $("modal-body").innerHTML = r.results.map((s) => `<div class="section">
+        <div class="row"><strong>${esc(s.name)}</strong>
+          <span class="pill ${s.status === "ok" ? "ok" : s.status === "needs_firecrawl" ? "warn" : "bad"}">${esc(s.status === "needs_firecrawl" ? "needs Firecrawl" : s.status)}</span>
+          ${s.method ? `<span class="pill">${esc(s.method)}</span>` : ""}<span class="muted">${s.articles.length} articles</span></div>
+        ${s.detail ? `<div class="muted">${esc(s.detail)}</div>` : ""}
+        <div class="table-wrap"><table><tbody>${s.articles.slice(0, 40).map((a) =>
+          `<tr><td class="muted" style="white-space:nowrap">${esc(a.date || "–")}</td><td><a href="${safeUrl(a.url)}" target="_blank" rel="noopener">${esc(a.title)}</a></td></tr>`).join("")}</tbody></table></div>
+        ${s.articles.length > 40 ? `<div class="muted">…and ${s.articles.length - 40} more</div>` : ""}</div>`).join("");
+  } catch (e) { $("modal-sub").textContent = ""; $("modal-body").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+}
+function openModal(title, sub, body) { $("modal-title").textContent = title; $("modal-sub").textContent = sub; $("modal-body").innerHTML = body; $("modal").classList.add("open"); }
+$("modal-close").addEventListener("click", () => $("modal").classList.remove("open"));
+$("modal").addEventListener("click", (e) => { if (e.target.id === "modal") $("modal").classList.remove("open"); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("modal").classList.remove("open"); });
+
+/* ---------- settings ---------- */
+async function loadConfig() {
+  try {
+    const c = await api("/config");
+    const rows = [
+      ["Model", `${c.model} (reasoning: ${c.reasoning_effort || "default"})`],
+      ["Prices (per 1M tokens)", `$${c.price_input_per_m} input · $${c.price_output_per_m} output`],
+      ["Sources", `${c.sites} (${c.feeds} via RSS)`],
+      ["Lookback", `${c.lookback_days} days`],
+      ["Firecrawl", c.firecrawl_enabled ? `enabled · max ${c.firecrawl_max_credits_per_run} credits/run · cooldown ${c.firecrawl_cooldown_hours}h · budgeted for ${c.firecrawl_runs_per_day} runs/day` : "disabled"],
+      ["Automatic runs", c.auto_run_times.length ? c.auto_run_times.join(", ") : "off"],
+      ["Output folder", c.output_dir],
+    ];
+    $("cfg").innerHTML = rows.map(([k, v]) => `<div>${esc(k)}</div><div>${esc(v)}</div>`).join("");
+    $("cost-explain").innerHTML = `<p style="margin-top:0">Each run's exact OpenAI cost is measured from the API's token counts and shown in <b>Runs &amp; digests</b>.</p>
+      <ul class="issues">
+        <li><b>Listing pages</b>: one ${esc(c.model)} call per newsroom whose page changed since the last run (unchanged pages and RSS feeds cost nothing).</li>
+        <li><b>Articles</b>: one call per new article to extract its opening text.</li>
+        <li><b>Firecrawl</b>: only for JavaScript-only/blocked pages, 1 credit each, automatically budgeted to last the month on the free plan.</li>
+      </ul>`;
+  } catch (e) { $("cfg").textContent = e.message; }
+}
+
+function refreshAll() { loadRuns(); loadCredits(); const t = document.querySelector("#tabs .active")?.dataset.tab;
+  if (t === "articles") loadArticles(); if (t === "sources") loadSources(); }
+
+(function initialTab() {
+  let t = location.hash.slice(1);
+  if (!t) { try { t = localStorage.getItem("nd-tab"); } catch (_) {} }
+  if (t) document.querySelector(`#tabs [data-tab="${CSS.escape(t)}"]`)?.click();
+})();
+loadRuns(); loadCredits(); loadConfig(); pollStatus();
+</script>
+</body>
+</html>

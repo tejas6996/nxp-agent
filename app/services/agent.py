@@ -1,205 +1,264 @@
 """
 GPT-based article extraction service.
 
-Uses OpenAI to parse structured article metadata from raw markdown
-scraped from newsroom listing pages and individual article pages.
+The model only *selects* information that is present on the page:
+
+* Listing pages are given as a link digest (see services.parsing). The model returns the
+  numeric IDs of article links; URLs are resolved from the page itself, so a link in the
+  digest can never be invented or mangled.
+* Titles returned by the model are verified against the page text and fall back to the
+  page's own anchor text when they cannot be found verbatim.
 """
 
-import asyncio
 import logging
+import re
+from datetime import date, timedelta
 from typing import Any
-from urllib.parse import urlparse
 
 from app.exceptions import OpenAIClientError
 from app.infra.openai import OpenAIClient
+from app.models import ArticleListing
+from app.services.parsing import (
+    ArticlePage,
+    LinkDigest,
+    collapse_ws,
+    normalize_for_match,
+    parse_date,
+    url_key,
+)
 
 logger = logging.getLogger(__name__)
 
-# Keywords that must appear in a redirect URL path for it to be accepted.
-# Prevents GPT from redirecting to product pages, resource hubs, or homepages.
-_NEWS_URL_KEYWORDS = frozenset(
-    {"news", "press", "blog", "release", "newsroom", "announcement", "media", "investor"}
+_GENERIC_LINK_TEXT = re.compile(
+    r"^(read|learn|see|view|find out|discover|click)( (more|full|the|article|release|story|here|details))*\W*$",
+    re.IGNORECASE,
 )
 
 _LISTING_SYSTEM_PROMPT = """You are a precise data extraction assistant specialising in technology company newsrooms.
 
-Your task is to extract a structured list of news articles from the markdown content of a newsroom or press release listing page.
+You receive the text of a newsroom or press-release listing page. Every hyperlink on the page is written as [link text](#N), where N is the link's numeric ID.
 
-Output format:
-Return ONLY a valid JSON object containing:
-  - "articles": an array of article objects (may be empty).
-  - "redirect_url": (optional) see redirect rules below.
+Task: list every news item shown on the page.
 
-Each article object must contain exactly these keys:
-  - "title": The headline of the article as a plain string. Do not truncate or modify it.
-  - "url": The full absolute URL to the article. If the extracted URL is relative, resolve it against the base URL provided. If resolution is not possible, omit the entry.
-  - "date": The publication date of the article in YYYY-MM-DD format. If a date is present but in another format, convert it. If no date is visible for the article, use null.
+For each item return:
+  - "link_id": the ID of the link that opens that item's own page. Prefer the headline link; if the headline itself is not a link, use the item's "Read more"/"Learn more" link. Use only IDs that appear in the text.
+  - "title": the item's headline copied exactly as written on the page - same words, same order, same capitalisation. Do not rephrase, shorten, translate or complete it. Remove only text that is not part of the headline itself, such as a category label, date, "Press Release", "News", or "Read more" that shares the same link.
+    The same link ID can appear in several places (e.g. a promotional banner/carousel with a marketing slogan AND the news list). Always take the title from the news-list entry - normally the text of the link itself - never from a banner slogan.
+  - "date": the item's publication date as YYYY-MM-DD if the page shows one for that item, otherwise null. Today's date is given; use it to resolve relative dates such as "2 days ago" and dates shown without a year (choose the most recent such date that is not in the future).
 
-Inclusion rules:
-  - Include: news articles, press releases, product announcements, executive statements, earnings releases, and technology blog posts.
-  - Exclude: navigation links, breadcrumbs, pagination controls, social media share buttons, category/tag labels, footer links, cookie notices, search widgets, and any link that does not point to a discrete article.
+Include: press releases, news articles, product announcements, executive and corporate announcements, financial/earnings releases, research briefs and technology blog posts that the page lists as news items.
+Exclude: navigation and menu links, category/tag/filter links, pagination, "see all"/archive links, social media links, footer links, product or solution pages, job postings, cookie notices, and anything that is not a discrete news item.
 
-Redirect rules:
-  - If after careful analysis you find NO articles on this page, and the page content visibly contains a hyperlink that leads directly to a newsroom, press releases, blogs, or news listing sub-page, set "redirect_url" to that absolute URL.
-  - CRITICAL: The redirect_url must be a URL that literally appears as a hyperlink in the markdown content provided to you. Do NOT use any URL from your training data or prior knowledge. Do NOT guess or construct a URL. If the exact URL is not present in the content, omit this field entirely.
-  - Only use redirect_url when articles is an empty array and a specific news listing link is explicitly visible in the content.
-  - Do NOT set redirect_url to a generic homepage, search page, social media page, or broad category hub. It must point to a page that directly lists individual articles or press releases.
+"listing_link_id": only if the page lists NO news items but clearly contains a link to the page that lists them (e.g. "All press releases"), give that link's ID. Otherwise null.
 
-Quality rules:
-  - Do not include duplicate URLs.
-  - Do not fabricate titles, URLs, or redirect_url. Only use values explicitly present in the content.
+Never invent items, titles, dates or IDs. If unsure whether something is a news item, leave it out."""
 
-Do not include any explanation, commentary, or markdown outside of the JSON object."""
+_LISTING_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "articles": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "link_id": {"type": "integer"},
+                    "title": {"type": "string"},
+                    "date": {"type": ["string", "null"]},
+                },
+                "required": ["link_id", "title", "date"],
+                "additionalProperties": False,
+            },
+        },
+        "listing_link_id": {"type": ["integer", "null"]},
+    },
+    "required": ["articles", "listing_link_id"],
+    "additionalProperties": False,
+}
 
 _ARTICLE_SYSTEM_PROMPT = """You are a precise content extraction assistant specialising in technology news articles.
 
-Your task is to extract structured data from the markdown content of a single technology news article page.
+You receive the cleaned text of a single news article page plus some metadata.
 
-Output format:
-Return ONLY a valid JSON object with exactly these keys:
-  - "title": The article headline as a plain string. Use the main H1 or the most prominent heading. Do not include the site name or section labels.
-  - "date": The article publication date in YYYY-MM-DD format. Look for a byline, dateline, or metadata tag. Use null if not found.
-  - "content": The first 300 words of the main article body as clean, readable prose. Preserve the natural sentence and paragraph flow. Do not truncate mid-sentence.
-  - "image_url": The absolute URL of the primary or featured image (hero image or Open Graph image). Prefer the largest or most prominent image associated with the article content. Use null if no image is present.
+Return:
+  - "title": the article headline exactly as written on the page (normally the H1). Do not include the site name or section labels. Do not rephrase.
+  - "date": the article's publication date as YYYY-MM-DD, from the dateline, byline or metadata. null if not found.
+  - "summary": the opening of the main article body, about 300 words, copied verbatim. Preserve the natural sentence and paragraph flow and end at a sentence boundary. Do not paraphrase or summarise. Separate paragraphs with a blank line.
 
-Exclusion rules for "content":
-  - Do not include: page title, author name, publication date line, section headers, navigation menus, related articles, social sharing prompts, newsletter sign-up text, cookie banners, legal disclaimers, or any boilerplate text that is not part of the article body.
+Exclude from "summary": the headline, author name, author/analyst biographies, the date line on its own, section headers, navigation, related articles, share prompts, newsletter sign-up text, cookie banners, image captions, contact details, "About <company>" boilerplate and legal boilerplate. A dateline at the start of the first paragraph (e.g. "SAN JOSE, Calif., Oct. 1, 2026 -") may be kept.
 
-Quality rules:
-  - Do not paraphrase or summarise the content. Extract the actual text verbatim.
-  - Do not fabricate any field. If a value cannot be determined from the content, use null.
-  - image_url must be an absolute URL starting with http:// or https://. Do not return relative paths.
+If the text does not contain the article body itself (e.g. an error page, a list of links, or only an author biography / company description), return an empty summary. Never invent content."""
 
-Do not include any explanation, commentary, or markdown outside of the JSON object."""
+_ARTICLE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string"},
+        "date": {"type": ["string", "null"]},
+        "summary": {"type": "string"},
+    },
+    "required": ["title", "date", "summary"],
+    "additionalProperties": False,
+}
 
 
-async def extract_articles_from_listings(
+def _clean_date(value: Any, today: date) -> str | None:
+    parsed = parse_date(value)
+    if parsed is None or parsed > today + timedelta(days=1) or parsed.year < 1990:
+        return None
+    return parsed.isoformat()
+
+
+_MONTHS = (
+    r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|"
+    r"Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?"
+)
+# A publication date glued to the end of a headline, e.g. "... performance Oct 2, 2026".
+_TRAILING_DATE = re.compile(
+    rf"[\s|\-–—,]*(?:{_MONTHS}\s+\d{{1,2}},?\s+\d{{4}}|\d{{1,2}}\s+{_MONTHS}\s+\d{{4}}"
+    rf"|\d{{4}}[-./]\d{{1,2}}[-./]\d{{1,2}})\s*$",
+    re.IGNORECASE,
+)
+
+
+def _strip_trailing_date(title: str) -> str:
+    stripped = _TRAILING_DATE.sub("", title).strip()
+    return stripped if len(stripped.split()) >= 3 else title
+
+
+def _verified_title(candidate: str, haystack_norm: str, fallback: str) -> str:
+    """Return the candidate title if it appears on the page, else a page-sourced fallback."""
+    candidate = collapse_ws(candidate)
+    if candidate and normalize_for_match(candidate) in haystack_norm:
+        return candidate
+    fallback = collapse_ws(fallback)
+    if fallback and not _GENERIC_LINK_TEXT.match(fallback) and len(fallback.split()) >= 3:
+        if candidate:
+            logger.debug("Title not found verbatim; using link text. %r -> %r", candidate, fallback)
+        return fallback
+    return candidate or fallback
+
+
+async def extract_listing(
     client: OpenAIClient,
-    listing_results: list[dict[str, Any]],
-    semaphore: asyncio.Semaphore,
-) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-    """Extract article metadata from scraped listing page markdown using GPT.
-
-    Args:
-        client: Initialised OpenAI client.
-        listing_results: Output of crawling.scrape_listing_pages.
-        semaphore: Semaphore controlling max parallel OpenAI calls.
+    source_name: str,
+    source_url: str,
+    page_url: str,
+    digest: LinkDigest,
+    today: date,
+) -> tuple[list[ArticleListing], str | None]:
+    """Extract article entries from a listing-page digest.
 
     Returns:
-        Tuple of (articles, redirect_hints).
-        articles: Flat list of article dicts with keys: source_name, title, url, date.
-        redirect_hints: List of {source_name, redirect_url} for sites that returned no articles
-            but suggested a more specific listing URL to follow.
-        Listings that fail GPT extraction are skipped with a warning.
-    """
+        (articles, listing_url). listing_url is set only when the page holds no articles
+        but links to the real listing page.
 
-    async def _extract_one(
-        listing: dict[str, Any],
-    ) -> tuple[list[dict[str, Any]], dict[str, str] | None]:
-        async with semaphore:
-            parsed = urlparse(listing["listing_url"])
-            base_url = f"{parsed.scheme}://{parsed.netloc}"
-            user_content = (
-                f"Base URL: {base_url}\n\nMarkdown:\n{listing['markdown'][:24000]}"
+    Raises:
+        OpenAIClientError: If the model call fails.
+    """
+    user_content = (
+        f"Today's date: {today.isoformat()}\n"
+        f"Company: {source_name}\n"
+        f"Page URL: {page_url}\n"
+        f"Page title: {digest.title}\n\n"
+        f"Page text:\n{digest.text}"
+    )
+    data = await client.complete_json(
+        _LISTING_SYSTEM_PROMPT, user_content, "newsroom_listing", _LISTING_SCHEMA
+    )
+
+    page_norm = normalize_for_match(digest.plain_text)
+    articles: list[ArticleListing] = []
+    seen_keys: set[str] = set()
+    for item in data.get("articles", []):
+        link = digest.links.get(item.get("link_id"))
+        if link is None:
+            logger.debug("%s: model returned unknown link id %r", source_name, item.get("link_id"))
+            continue
+        key = url_key(link.url)
+        if key in seen_keys:
+            continue
+        title = _strip_trailing_date(_verified_title(item.get("title", ""), page_norm, link.text))
+        if not title:
+            continue
+        seen_keys.add(key)
+        articles.append(
+            ArticleListing(
+                title=title,
+                url=link.url,
+                date=_clean_date(item.get("date"), today),
+                source_name=source_name,
+                source_url=source_url,
             )
-            try:
-                data = await asyncio.to_thread(
-                    client.complete_json, _LISTING_SYSTEM_PROMPT, user_content
-                )
-                articles: list[dict[str, Any]] = data.get("articles", [])
-                for article in articles:
-                    article["source_name"] = listing["source_name"]
+        )
 
-                redirect_hint: dict[str, str] | None = None
-                if not articles:
-                    raw_redirect = data.get("redirect_url", "")
-                    # Strip URL fragment anchors that break scraping
-                    redirect_url = raw_redirect.split("#")[0].rstrip("/") if raw_redirect else ""
-                    if redirect_url and redirect_url.startswith("http"):
-                        url_lower = redirect_url.lower()
-                        if any(kw in url_lower for kw in _NEWS_URL_KEYWORDS):
-                            redirect_hint = {
-                                "source_name": listing["source_name"],
-                                "redirect_url": redirect_url,
-                            }
-                            logger.info(
-                                "No articles from %s. Redirect accepted: %s",
-                                listing["source_name"],
-                                redirect_url,
-                            )
-                        else:
-                            logger.info(
-                                "No articles from %s. Redirect rejected (non-news URL): %s",
-                                listing["source_name"],
-                                redirect_url,
-                            )
-
-                logger.info(
-                    "Extracted %d articles from %s listing.",
-                    len(articles),
-                    listing["source_name"],
-                )
-                return articles, redirect_hint
-            except (OpenAIClientError, KeyError, ValueError) as exc:
-                logger.warning(
-                    "Skipping listing extraction for %s: %s",
-                    listing["source_name"],
-                    exc,
-                )
-                return [], None
-
-    tasks = [asyncio.create_task(_extract_one(listing)) for listing in listing_results]
-    results = await asyncio.gather(*tasks)
-
-    all_articles: list[dict[str, Any]] = []
-    redirect_hints: list[dict[str, str]] = []
-    for articles, hint in results:
-        all_articles.extend(articles)
-        if hint:
-            redirect_hints.append(hint)
-
-    return all_articles, redirect_hints
+    listing_url: str | None = None
+    if not articles and data.get("listing_link_id") is not None:
+        link = digest.links.get(data["listing_link_id"])
+        if link is not None:
+            listing_url = link.url
+    return articles, listing_url
 
 
-async def extract_article_contents(
+def _lead_paragraphs(text: str, max_words: int = 300) -> str:
+    """Deterministic fallback summary: the first substantial paragraphs of the body."""
+    picked: list[str] = []
+    words = 0
+    for line in text.split("\n"):
+        count = len(line.split())
+        if count < 20:
+            continue
+        picked.append(line)
+        words += count
+        if words >= max_words:
+            break
+    return "\n\n".join(picked)
+
+
+async def extract_article(
     client: OpenAIClient,
-    scraped_articles: list[dict[str, Any]],
-    semaphore: asyncio.Semaphore,
-) -> list[dict[str, Any]]:
-    """Extract structured content from scraped article page markdown using GPT.
+    listing: ArticleListing,
+    page: ArticlePage,
+    today: date,
+) -> dict[str, Any]:
+    """Extract headline, date and opening text from a fetched article page.
 
-    Args:
-        client: Initialised OpenAI client.
-        scraped_articles: Output of crawling.scrape_articles.
-        semaphore: Semaphore controlling max parallel OpenAI calls.
+    Never raises for model errors: falls back to deterministic extraction instead, so an
+    article is never lost because of an LLM hiccup.
 
     Returns:
-        List of article dicts with keys: source_name, url, title, date, content, image_url.
-        Articles that fail extraction are skipped with a warning.
+        Dict with keys title, date, summary (summary may be empty).
     """
+    haystack = "\n".join([page.h1, page.meta_title, listing.title, page.text[:4000]])
+    haystack_norm = normalize_for_match(haystack)
+    meta_date = page.published.isoformat() if page.published else None
 
-    async def _extract_one(article: dict[str, Any]) -> dict[str, Any] | None:
-        async with semaphore:
-            try:
-                data = await asyncio.to_thread(
-                    client.complete_json,
-                    _ARTICLE_SYSTEM_PROMPT,
-                    article["markdown"][:12000],
-                )
-                return {
-                    "source_name": article["source_name"],
-                    "url": article["url"],
-                    "title": data.get("title") or article.get("title", "Untitled"),
-                    "date": data.get("date") or article.get("date"),
-                    "content": data.get("content", ""),
-                    "image_url": data.get("image_url"),
-                }
-            except (OpenAIClientError, KeyError, ValueError) as exc:
-                logger.warning(
-                    "Skipping content extraction for %s: %s", article["url"], exc
-                )
-                return None
+    if not page.text.strip():
+        return {"title": listing.title, "date": listing.date or meta_date, "summary": ""}
 
-    tasks = [asyncio.create_task(_extract_one(a)) for a in scraped_articles]
-    results = await asyncio.gather(*tasks)
-    return [r for r in results if r is not None]
+    user_content = (
+        f"Article URL: {listing.url}\n"
+        f"Headline on the newsroom listing: {listing.title}\n"
+        f"Page H1: {page.h1 or '(none)'}\n"
+        f"Page meta title: {page.meta_title or '(none)'}\n"
+        f"Published date from metadata: {meta_date or '(none)'}\n\n"
+        f"Article text:\n{page.text[:12000]}"
+    )
+    try:
+        data = await client.complete_json(
+            _ARTICLE_SYSTEM_PROMPT, user_content, "news_article", _ARTICLE_SCHEMA
+        )
+        summary = (data.get("summary") or "").strip()
+    except OpenAIClientError as exc:
+        logger.warning("Article extraction fell back to plain text for %s: %s", listing.url, exc)
+        data = {}
+        # Only when the model is unavailable; an intentionally empty summary (no article
+        # body on the page) must not be replaced by whatever text the page has.
+        summary = _lead_paragraphs(page.text)
+
+    # Keep the headline exactly as the newsroom lists it. Only when the listing truncated it
+    # ("...") is the article page's own (verified) headline used instead.
+    title = listing.title
+    if listing.title.rstrip().endswith(("...", "…")):
+        title = _verified_title(data.get("title", ""), haystack_norm, page.h1 or listing.title)
+    # The date the newsroom itself displays wins; page metadata and the model are fallbacks.
+    article_date = listing.date or meta_date or _clean_date(data.get("date"), today)
+    return {"title": title, "date": article_date, "summary": summary}

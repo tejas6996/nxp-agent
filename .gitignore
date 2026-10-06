@@ -30,7 +30,8 @@ build/
 scraper.log
 
 # State file (contains run history — do not commit)
-scraper_state.json
+scraper_state*.json
+scraper_state.json.lock
 
 # Output documents (generated artefacts)
 output_docs/*.docx
