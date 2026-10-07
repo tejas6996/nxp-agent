@@ -9,13 +9,16 @@ Accuracy safeguards:
 * After writing, every number and every quotation in the draft is checked against the
   source text; anything that cannot be found is listed in `warnings` for the editor.
 
-Drafts are saved to <OUTPUT_DIR>/press_releases/ as JSON (for tools) and Markdown.
+Drafts are saved to <OUTPUT_DIR>/press_releases/ as JSON (for tools) and Markdown; the
+article's images are saved in <OUTPUT_DIR>/press_releases/<draft id>/.
 """
 
+import asyncio
 import json
 import logging
 import math
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -24,11 +27,14 @@ from app.exceptions import AppBaseException, FirecrawlClientError
 from app.infra.firecrawl import FirecrawlClient
 from app.infra.http import HttpFetcher
 from app.infra.openai import OpenAIClient
-from app.models import PressReleaseDraft
+from app.models import DraftImage, PressReleaseDraft
+from app.services.images import DownloadedImage, describe_alt, download_images, make_featured
 from app.services.parsing import (
+    ImageRef,
     clean_url,
     collapse_ws,
     extract_article_page,
+    good_image,
     normalize_for_match,
     url_key,
 )
@@ -67,7 +73,7 @@ Output (JSON):
 - "summary": one sentence (max 30 words) summarising the article, for the article teaser / meta description.
 - "paragraphs": the article body, one string per paragraph, in order. Plain text only - no markdown, no headings, no bullet characters.
 
-The source press release is the ONLY source of facts. Every number, name, part number, date and quote must come from it."""
+The source press release is the ONLY source of information. Every fact, number, name, part number, date, quote, explanation and piece of context must come from it. Do not use general knowledge. If something is not in the source, leave it out - a shorter article is better than one with added information."""
 
 
 class PressReleaseError(AppBaseException):
@@ -96,22 +102,37 @@ def find_digest_article(url: str, output_dir: Path) -> dict[str, Any] | None:
 
 async def _get_source_text(
     url: str, settings: Settings, article: dict[str, Any] | None
-) -> tuple[str, str, str | None, str]:
-    """Best available source text. Returns (title, text, published_date, fetched_via).
+) -> tuple[str, str, str | None, str, list[ImageRef]]:
+    """Best available source text and images.
 
+    Returns (title, text, published_date, fetched_via, image_refs).
     Order: live page fetch (free, freshest extraction) -> text saved in the digest ->
     Firecrawl (1 credit, only while the balance is above the reserve).
     """
+    digest_images = _news_image(article)
     async with HttpFetcher(settings) as http:
         result = await http.fetch(url)
     page = None
     if result is not None and result.ok and not result.is_challenge and result.is_html:
         page = extract_article_page(result.content, result.final_url)
         if len(page.text) >= _MIN_SOURCE_CHARS:
-            return page.h1 or page.meta_title, page.text, _iso(page.published), "direct"
+            return (
+                page.h1 or page.meta_title,
+                page.text,
+                _iso(page.published),
+                "direct",
+                _merge_refs(digest_images, page.images),
+            )
 
     if article and len(article.get("body_text") or "") >= _MIN_SOURCE_CHARS:
-        return article.get("title") or "", article["body_text"], article.get("published_date"), "digest"
+        images = _merge_refs(digest_images, page.images if page else [])
+        return (
+            article.get("title") or "",
+            article["body_text"],
+            article.get("published_date"),
+            "digest",
+            images,
+        )
 
     if settings.firecrawl_enabled and settings.firecrawl_api_key:
         client = FirecrawlClient(settings)
@@ -126,16 +147,35 @@ async def _get_source_text(
                         rendered.text,
                         _iso(rendered.published),
                         "firecrawl",
+                        _merge_refs(digest_images, rendered.images),
                     )
             except FirecrawlClientError as exc:
                 logger.warning("Firecrawl could not render %s: %s", url, exc)
 
     if page is not None and len(page.text) >= 150:
-        return page.h1 or page.meta_title, page.text, _iso(page.published), "direct"
+        return (
+            page.h1 or page.meta_title,
+            page.text,
+            _iso(page.published),
+            "direct",
+            _merge_refs(digest_images, page.images),
+        )
     raise PressReleaseError(
         "Could not read the article text from the source page (blocked or rendered by "
         "JavaScript, and no Firecrawl credit was available)."
     )
+
+
+def _news_image(article: dict[str, Any] | None) -> list[ImageRef]:
+    """The image extracted with the news item in the digest (if any)."""
+    if article and article.get("image_url") and good_image(article["image_url"]):
+        return [ImageRef(url=article["image_url"], origin="news")]
+    return []
+
+
+def _merge_refs(first: list[ImageRef], rest: list[ImageRef]) -> list[ImageRef]:
+    seen = {r.url for r in first}
+    return first + [r for r in rest if r.url not in seen]
 
 
 def _iso(value: Any) -> str | None:
@@ -173,6 +213,12 @@ def fact_check(paragraphs: list[str], headline: str, source_text: str) -> list[s
             "Figures not found in the source - please verify: " + ", ".join(missing_numbers)
         )
 
+    unsourced = unsourced_terms(paragraphs, headline, source_text)
+    if unsourced:
+        warnings.append(
+            "Names or terms not found in the source - please verify: " + ", ".join(unsourced)
+        )
+
     for match in _QUOTE_RE.finditer(draft):
         quote = collapse_ws(match.group(1))
         # Check sentence by sentence: a quote the source split around "said X" may be
@@ -184,6 +230,61 @@ def fact_check(paragraphs: list[str], headline: str, source_text: str) -> list[s
                     f"Quotation not found word-for-word in the source: “{sentence[:140]}”"
                 )
     return warnings
+
+
+_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9&+./\-]*[A-Za-z0-9]|[A-Za-z]")
+_MONTHS_AND_DAYS = {
+    "january", "february", "march", "april", "may", "june", "july", "august", "september",
+    "october", "november", "december", "jan", "feb", "mar", "apr", "jun", "jul", "aug",
+    "sep", "sept", "oct", "nov", "dec", "monday", "tuesday", "wednesday", "thursday",
+    "friday", "saturday", "sunday",
+}
+
+
+def _squash(text: str) -> str:
+    return re.sub(r"[\s\-]+", "", normalize_for_match(text))
+
+
+def unsourced_terms(paragraphs: list[str], headline: str, source_text: str) -> list[str]:
+    """Proper names, acronyms and part numbers in the draft that the source never mentions.
+
+    Checks: words containing digits (part numbers, "5G"), all-caps acronyms, and
+    capitalised words that do not start a sentence (names of people, companies, places,
+    products). Comparison ignores case, spaces and hyphens; a plural "s" is tolerated.
+    """
+    source = _squash(source_text)
+
+    def in_source(term: str) -> bool:
+        squashed = _squash(term).strip("./")
+        return not squashed or squashed in source or (
+            squashed.endswith("s") and squashed[:-1] in source
+        )
+
+    found: list[str] = []
+
+    def consider(term: str) -> None:
+        term = term.strip("./-")
+        if len(term) < 2 or term.lower() in _MONTHS_AND_DAYS or term in found:
+            return
+        if not in_source(term):
+            found.append(term)
+
+    # Headline: only part numbers and acronyms (it is written in Title Case).
+    for match in _WORD_RE.finditer(headline):
+        word = match.group(0)
+        if any(c.isdigit() for c in word) or (word.isupper() and len(word) >= 2):
+            consider(word)
+
+    for paragraph in paragraphs:
+        for match in _WORD_RE.finditer(paragraph):
+            word = match.group(0)
+            before = paragraph[: match.start()].rstrip()
+            sentence_start = not before or before[-1] in '.!?:;"“(‘\''
+            if any(c.isdigit() for c in word) or (word.isupper() and len(word) >= 2):
+                consider(word)
+            elif word[0].isupper() and not sentence_start:
+                consider(word)
+    return found
 
 
 def display_date(value: datetime) -> str:
@@ -224,7 +325,9 @@ async def generate_press_release(
     output_dir = Path(settings.output_dir)
     article = find_digest_article(url, output_dir)
 
-    fetched_title, text, published, fetched_via = await _get_source_text(url, settings, article)
+    fetched_title, text, published, fetched_via, image_refs = await _get_source_text(
+        url, settings, article
+    )
     if article:
         source_title = source_title or article.get("title")
         source_name = source_name or article.get("source_name")
@@ -246,12 +349,16 @@ async def generate_press_release(
         f"Today's date: {datetime.now():%Y-%m-%d}\n\n"
         f"Text:\n{text[:_MAX_SOURCE_CHARS]}"
     )
+    # Write the article and download the source's images at the same time.
     try:
-        data = await llm.complete_json(
-            _SYSTEM_TEMPLATE.format(guidelines=guidelines),
-            user_content,
-            "eeherald_article",
-            _SCHEMA,
+        data, (downloaded, failed_images) = await asyncio.gather(
+            llm.complete_json(
+                _SYSTEM_TEMPLATE.format(guidelines=guidelines),
+                user_content,
+                "eeherald_article",
+                _SCHEMA,
+            ),
+            _download_source_images(image_refs, url, settings),
         )
     except AppBaseException as exc:
         raise PressReleaseError(f"Article generation failed: {exc.message}") from exc
@@ -282,15 +389,134 @@ async def generate_press_release(
         model=llm.model,
         openai_cost_usd=round(llm.usage.cost_usd, 6),
         warnings=fact_check(paragraphs, headline, text),
+        image_after_paragraph=min(2, len(paragraphs)),
     )
+    _store_images(draft, downloaded, failed_images, image_refs, output_dir)
     save_draft(draft, output_dir)
     logger.info(
-        "Press release written: %r (%d words, $%.4f, %d warnings)",
+        "Press release written: %r (%d words, %d images, $%.4f, %d warnings)",
         draft.headline,
         words,
+        len(draft.images),
         draft.openai_cost_usd,
         len(draft.warnings),
     )
+    return draft
+
+
+# ---------------------------------------------------------------------------
+# Images
+# ---------------------------------------------------------------------------
+
+FEATURED_FILE = "featured-1200x800.png"
+NO_IMAGE_NOTE = "No image found in the source article."
+
+
+async def _download_source_images(
+    refs: list[ImageRef], referer: str, settings: Settings
+) -> tuple[list[DownloadedImage], list[str]]:
+    """Download usable images; never fails the article (returns no images on any error)."""
+    if not refs:
+        return [], []
+    try:
+        async with HttpFetcher(settings) as http:
+            return await download_images(refs, referer, http)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Image download failed for %s: %s", referer, exc)
+        return [], [r.url for r in refs]
+
+
+def image_dir(output_dir: Path, draft_id: str) -> Path:
+    return drafts_dir(output_dir) / draft_id
+
+
+def _image_note(refs: list[ImageRef], failed: list[str]) -> str:
+    """Explain why an article has no image."""
+    if not refs:
+        return NO_IMAGE_NOTE
+    news = [r.url for r in refs if r.origin == "news"]
+    tried = news[0] if news else (failed[0] if failed else refs[0].url)
+    return (
+        "An image was found in the source article but could not be downloaded or was not "
+        f"usable (e.g. a logo or icon): {tried}"
+    )
+
+
+def _store_images(
+    draft: PressReleaseDraft,
+    downloaded: list[DownloadedImage],
+    failed: list[str],
+    refs: list[ImageRef],
+    output_dir: Path,
+) -> None:
+    """Save the original image files next to the draft and use the first one."""
+    folder = image_dir(output_dir, draft.id)
+    shutil.rmtree(folder, ignore_errors=True)
+    draft.images, draft.featured_index, draft.featured_file, draft.image_alt = [], None, None, ""
+    draft.image_note = ""
+    if not downloaded:
+        draft.image_note = _image_note(refs, failed)
+        return
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        for number, image in enumerate(downloaded, start=1):
+            name = f"image-{number}.{image.extension}"
+            (folder / name).write_bytes(image.data)  # original bytes, unmodified
+            draft.images.append(
+                DraftImage(
+                    file=name,
+                    source_url=image.source_url,
+                    alt=image.alt,
+                    origin=image.origin,
+                    width=image.width,
+                    height=image.height,
+                )
+            )
+    except OSError as exc:
+        logger.error("Could not save images for %s: %s", draft.id, exc)
+        draft.images = []
+        draft.image_note = f"The image could not be saved: {exc}"
+        return
+    set_featured_image(draft, 0, output_dir)
+
+
+def set_featured_image(draft: PressReleaseDraft, index: int | None, output_dir: Path) -> None:
+    """Use image `index` (EE Herald 1200x800 copy of it), or no image when None."""
+    folder = image_dir(output_dir, draft.id)
+    (folder / FEATURED_FILE).unlink(missing_ok=True)
+    if index is None or not (0 <= index < len(draft.images)):
+        draft.featured_index, draft.featured_file, draft.image_alt = None, None, ""
+        draft.image_note = (
+            "No image selected by the editor." if draft.images else draft.image_note or NO_IMAGE_NOTE
+        )
+        return
+    image = draft.images[index]
+    try:
+        (folder / FEATURED_FILE).write_bytes(make_featured((folder / image.file).read_bytes()))
+    except (OSError, ValueError) as exc:
+        logger.error("Could not prepare the article image for %s: %s", draft.id, exc)
+        draft.featured_index, draft.featured_file = None, None
+        draft.image_note = f"The image could not be prepared: {exc}"
+        return
+    draft.featured_index = index
+    draft.featured_file = FEATURED_FILE
+    draft.image_alt = describe_alt(image.alt, draft.headline)
+    draft.image_note = ""
+
+
+async def refresh_images(draft: PressReleaseDraft, settings: Settings) -> PressReleaseDraft:
+    """Re-collect images for an existing draft from its source page (text unchanged)."""
+    output_dir = Path(settings.output_dir)
+    refs: list[ImageRef] = []
+    async with HttpFetcher(settings) as http:
+        result = await http.fetch(draft.source_url)
+    if result is not None and result.ok and not result.is_challenge and result.is_html:
+        refs = extract_article_page(result.content, result.final_url).images
+    refs = _merge_refs(_news_image(find_digest_article(draft.source_url, output_dir)), refs)
+    downloaded, failed = await _download_source_images(refs, draft.source_url, settings)
+    _store_images(draft, downloaded, failed, refs, output_dir)
+    draft.image_after_paragraph = min(2, len(draft.paragraphs))
+    save_draft(draft, output_dir)
     return draft
 
 
@@ -313,8 +539,13 @@ def to_markdown(draft: PressReleaseDraft) -> str:
         f"Section: {section}" + (f" | Tags: {', '.join(draft.tags)}" if draft.tags else ""),
         "",
     ]
-    for paragraph in draft.paragraphs:
+    for number, paragraph in enumerate(draft.paragraphs, start=1):
         lines += [paragraph, ""]
+        if number == draft.image_after_paragraph:
+            if draft.featured_file:
+                lines += [f"![{draft.image_alt}]({draft.id}/{draft.featured_file})", ""]
+            elif draft.image_note:
+                lines += [f"*[Image: {draft.image_note}]*", ""]
     lines += ["---", f"Source: [{draft.source_title or draft.source_url}]({draft.source_url})"]
     if draft.warnings:
         lines += ["", "Check before publishing:"] + [f"- {w}" for w in draft.warnings]

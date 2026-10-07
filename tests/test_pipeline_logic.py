@@ -313,3 +313,120 @@ def test_press_release_markdown_and_storage(tmp_path: Path) -> None:
     save_draft(draft, tmp_path)
     assert [d.id for d in list_drafts(tmp_path)] == [draft.id]
     assert find_draft_for_url("http://www.acme.com/news/x100/", tmp_path).id == draft.id
+
+
+def _png(width: int, height: int, color: tuple[int, int, int] = (200, 30, 30), pattern: bool = False) -> bytes:
+    from io import BytesIO
+
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (width, height), color)
+    if pattern:  # distinct picture content for duplicate detection
+        ImageDraw.Draw(img).rectangle([0, 0, width // 2, height // 3], fill=(10, 200, 10))
+    out = BytesIO()
+    img.save(out, format="PNG")
+    return out.getvalue()
+
+
+def test_inspect_image_filters_unusable_images() -> None:
+    from app.services.images import inspect_image
+
+    assert inspect_image(_png(120, 40)) is None  # button / icon
+    assert inspect_image(_png(1600, 200)) is None  # banner strip
+    assert inspect_image(b"not an image") is None
+    ext, w, h, _ = inspect_image(_png(1000, 600))
+    assert (ext, w, h) == ("png", 1000, 600)
+
+
+def test_make_featured_is_always_1200x800() -> None:
+    from io import BytesIO
+
+    from PIL import Image
+
+    from app.services.images import make_featured
+
+    for size in [(1500, 1000), (1600, 900), (800, 800), (600, 1000)]:  # crop and fit paths
+        out = Image.open(BytesIO(make_featured(_png(*size))))
+        assert out.size == (1200, 800) and out.format == "PNG"
+    # A tall product shot is fitted on white, not cropped: corners are white.
+    tall = Image.open(BytesIO(make_featured(_png(600, 1000)))).convert("RGB")
+    assert tall.getpixel((5, 5)) == (255, 255, 255)
+
+
+async def test_download_images_dedupes_and_orders() -> None:
+    from app.infra.http import FetchResult
+    from app.services.images import download_images
+    from app.services.parsing import ImageRef
+
+    files = {
+        "https://x.com/small-share.jpg": _png(600, 400, pattern=True),
+        "https://x.com/big-share.jpg": _png(1800, 1200, pattern=True),  # same picture, larger
+        "https://x.com/product.jpg": _png(1000, 700, color=(20, 20, 220)),
+        "https://x.com/button.png": _png(150, 40),
+    }
+
+    class FakeHttp:
+        async def fetch(self, url: str, referer: str | None = None) -> FetchResult:
+            return FetchResult(url, url, 200, files[url], "image/png")
+
+    refs = [
+        ImageRef("https://x.com/product.jpg", "Product photo of the X100 module", "content"),
+        ImageRef("https://x.com/button.png", "Buy", "content"),
+        ImageRef("https://x.com/big-share.jpg", "", "social"),
+        ImageRef("https://x.com/small-share.jpg", "", "news"),  # image extracted with the news
+    ]
+    kept, failed = await download_images(refs, "https://x.com/news", FakeHttp())  # type: ignore[arg-type]
+    # The news item's own image comes first; its larger duplicate is not added again.
+    assert [k.source_url for k in kept] == ["https://x.com/small-share.jpg", "https://x.com/product.jpg"]
+    assert kept[0].data == files["https://x.com/small-share.jpg"]  # original bytes, unmodified
+    assert failed == ["https://x.com/button.png"]
+
+
+def test_describe_alt() -> None:
+    from app.services.images import describe_alt
+
+    assert describe_alt("Product photo of the X100 module", "Headline") == "Product photo of the X100 module"
+    assert describe_alt("Synopsys-CA-Headquarters-v1", "Headline") == "Headline"
+    assert describe_alt("", "Headline") == "Headline"
+
+
+def test_unsourced_terms_flags_outside_information() -> None:
+    from app.services.press_release import unsourced_terms
+
+    source = (
+        "TOKYO, Japan - Renesas Electronics Corporation today launched the RTP100E005G1FL, "
+        "a 100V E-mode GaN FET for AI data centers and humanoid robotics. Samples are "
+        "available in October. Akhil Nair, senior director at Renesas, said the MOSFET-"
+        "compatible packages ease migration."
+    )
+    clean = [
+        "Renesas Electronics Corporation has launched the RTP100E005G1FL, a 100V E-mode GaN "
+        "FET for AI data centers and humanoid robotics.",
+        "Akhil Nair, senior director at Renesas, said the MOSFET-compatible packages ease "
+        "migration. Samples are available in October.",
+    ]
+    assert unsourced_terms(clean, "Renesas Launches 100V GaN FETs for AI Data Centers", source) == []
+
+    added = clean + [
+        "The parts compete with Infineon's CoolGaN family, and TSMC will build them on its "
+        "N3 process, according to analysts in Taiwan."
+    ]
+    flagged = unsourced_terms(added, "Renesas Launches 100V GaN FETs", source)
+    for term in ("Infineon", "CoolGaN", "TSMC", "N3", "Taiwan"):
+        assert any(term in f for f in flagged), (term, flagged)
+
+
+def test_verbatim_summary_drops_unpublished_sentences() -> None:
+    from app.services.agent import verbatim_summary
+
+    page = (
+        "Acme today announced the X100 controller.\nIt draws 2 mW in standby (typ.).\n"
+        "Availability is expected in Q4 2026."
+    )
+    summary = (
+        "Acme today announced the X100 controller. It draws 2 mW in standby (typ.).\n"
+        "This makes it the best controller on the market. Availability is expected in Q4 2026."
+    )
+    verified, kept, dropped = verbatim_summary(summary, page)
+    assert (kept, dropped) == (3, 1)
+    assert "best controller" not in verified and "Q4 2026" in verified

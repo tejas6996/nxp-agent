@@ -124,6 +124,61 @@ def _strip_trailing_date(title: str) -> str:
     return stripped if len(stripped.split()) >= 3 else title
 
 
+def _compact(text: str) -> str:
+    """Normalised text without any whitespace, for robust word-for-word comparisons
+    (page text extraction may add or drop spaces around links, brackets and tags)."""
+    return re.sub(r"\s+", "", normalize_for_match(text))
+
+
+_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+(?=[\"“(\[]?[A-Z0-9])")
+
+
+def verbatim_summary(summary: str, page_text: str) -> tuple[str, int, int]:
+    """Keep only the sentences of `summary` that appear word-for-word on the page.
+
+    Returns (verified summary, sentences kept, sentences dropped). Paragraph breaks are
+    preserved. This guarantees the digest never shows text the company did not publish.
+    """
+    page = _compact(page_text)
+    kept_paragraphs: list[str] = []
+    kept = dropped = 0
+    for paragraph in summary.split("\n"):
+        sentences = [x.strip() for x in _SENTENCE_RE.split(paragraph.strip()) if x.strip()]
+        good: list[str] = []
+        for sentence in sentences:
+            core = _compact(sentence).rstrip(".!?\"”'’")
+            if not core or core in page:
+                good.append(sentence)
+                kept += 1
+            else:
+                dropped += 1
+        if good:
+            kept_paragraphs.append(" ".join(good))
+    return "\n\n".join(kept_paragraphs), kept, dropped
+
+
+def _published_title(listing_title: str, page: ArticlePage) -> str:
+    """The headline as published by the company.
+
+    The newsroom listing's headline is kept when it also appears on the article page;
+    otherwise the article page's own headline (H1 or og:title) is used when it is clearly
+    the same story.
+    """
+    haystack = _compact("\n".join([page.h1, page.meta_title, page.text[:4000]]))
+    if _compact(listing_title) in haystack:
+        return listing_title
+    listing_words = set(normalize_for_match(listing_title).split())
+    best, best_overlap = listing_title, 0.0
+    for candidate in (page.h1, page.meta_title):
+        words = set(normalize_for_match(candidate).split())
+        if not words or not listing_words:
+            continue
+        overlap = len(words & listing_words) / len(listing_words)
+        if overlap > best_overlap:
+            best, best_overlap = collapse_ws(candidate), overlap
+    return best if best_overlap >= 0.6 else listing_title
+
+
 def _verified_title(candidate: str, haystack_norm: str, fallback: str) -> str:
     """Return the candidate title if it appears on the page, else a page-sourced fallback."""
     candidate = collapse_ws(candidate)
@@ -254,11 +309,23 @@ async def extract_article(
         # body on the page) must not be replaced by whatever text the page has.
         summary = _lead_paragraphs(page.text)
 
-    # Keep the headline exactly as the newsroom lists it. Only when the listing truncated it
-    # ("...") is the article page's own (verified) headline used instead.
-    title = listing.title
+    # Only text the company published may appear in the digest: drop any sentence that is
+    # not on the page word-for-word; if much was dropped, copy the opening paragraphs.
+    if summary:
+        verified, kept, dropped = verbatim_summary(summary, page.text)
+        if dropped:
+            logger.info(
+                "Summary for %s: %d sentence(s) not found word-for-word on the page were removed.",
+                listing.url,
+                dropped,
+            )
+        summary = verified if kept and kept >= 2 * dropped else _lead_paragraphs(page.text)
+
+    # Keep the headline exactly as the company published it.
     if listing.title.rstrip().endswith(("...", "…")):
         title = _verified_title(data.get("title", ""), haystack_norm, page.h1 or listing.title)
+    else:
+        title = _published_title(listing.title, page)
     # The date the newsroom itself displays wins; page metadata and the model are fallbacks.
     article_date = listing.date or meta_date or _clean_date(data.get("date"), today)
     return {"title": title, "date": article_date, "summary": summary}

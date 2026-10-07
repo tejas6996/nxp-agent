@@ -122,13 +122,18 @@ Only one run can use the state file at a time; a second run started meanwhile ex
 
 ---
 
+## What the digest contains
+
+Everything in the digest PDF is published by the companies themselves: the headline (verified against the newsroom page and the article page), the link, the date shown by the newsroom, the image from the article page, and the opening text of the article. The opening text is checked sentence by sentence against the article page; any sentence that does not appear there word-for-word is removed (if many would be removed, the article's opening paragraphs are copied directly instead).
+
 ## Press releases (EE Herald articles)
 
 Click **Create press release** on an article (Articles tab), or paste any press-release link in the **Press releases** tab. In 10–40 seconds you get an article in EE Herald's house style — headline, byline, lead, technical detail, quotes, availability — ready to copy (formatted or plain text) or download (.txt / .html).
 
 - **Style rules** live in [`press_release_guidelines.md`](press_release_guidelines.md) (with two published EE Herald articles as examples). Edit that file to change the style; no code change or restart is needed.
-- **Accuracy:** the writer only uses the source press release. Afterwards every figure and quotation in the draft is checked against the source; anything not found is shown in a yellow **Check before publishing** box.
+- **Only what the company published:** the writer may use nothing but the source press release (no general knowledge, background, definitions or added context — see `press_release_guidelines.md`). Afterwards every figure, quotation, name, acronym and part number in the draft is checked against the source; anything not found is shown in a yellow **Check before publishing** box.
 - **Source text:** the source page is re-read live (free); if that fails, the text saved in the digest is used; Firecrawl (1 credit) is a last resort.
+- **Image:** like EE Herald, each article gets one image, **1200 × 800 px PNG**, placed after the 2nd paragraph (and usable as the listing thumbnail). It is taken live from the source article — the image extracted with the news item first, then the company's share image, then photos/diagrams in the release; if there is none, the article says *"Image: No image found in the source article"* (or that it could not be downloaded) in its place; logos, icons, buttons, banners and duplicates are skipped. Images close to 3:2 are centre-cropped, others are fitted on white so products are never cut off. Pick another image or "No image" under **Article image**; low-resolution sources are flagged. **Download all (.zip)** gives the text (.txt/.html/.md), the 1200 × 800 image and the original. Drafts made before this feature can use **Find images**.
 - Drafts are saved in `output_docs/press_releases/` (JSON + Markdown). Clicking the button again opens the saved draft; **Regenerate** writes a new version.
 - Command line: `uv run app/run.py --press-release <URL>`
 - Cost: about **$0.001 per article** (gpt-6-luna, medium reasoning).

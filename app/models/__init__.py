@@ -62,6 +62,18 @@ class ArticleIssue(BaseModel):
     problem: str
 
 
+class DraftImage(BaseModel):
+    """An image taken from the source press release, saved next to the draft."""
+
+    file: str  # original image file name inside the draft's image folder
+    source_url: str
+    alt: str = ""
+    # "news" (extracted with the news item), "social" (publisher's share image) or "content"
+    origin: str = "content"
+    width: int
+    height: int
+
+
 class PressReleaseDraft(BaseModel):
     """An article written in EE Herald house style from a source press release."""
 
@@ -84,6 +96,13 @@ class PressReleaseDraft(BaseModel):
     openai_cost_usd: float = 0.0
     # Figures / quotes in the draft that could not be found in the source text.
     warnings: list[str] = Field(default_factory=list)
+    # Images: candidates from the source, the chosen one, and its 1200x800 EE Herald version.
+    images: list[DraftImage] = Field(default_factory=list)
+    featured_index: Optional[int] = None
+    featured_file: Optional[str] = None
+    image_alt: str = ""
+    image_after_paragraph: int = 2  # EE Herald places the image after the 2nd paragraph
+    image_note: str = ""  # why there is no image (shown in place of the image)
 
 
 class DigestRunResult(BaseModel):

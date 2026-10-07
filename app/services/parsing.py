@@ -343,6 +343,15 @@ _BAD_IMAGE_HINTS = ("logo", "icon", "sprite", "avatar", "placeholder", "fallback
 
 
 @dataclass
+class ImageRef:
+    """An image referenced by an article page."""
+
+    url: str
+    alt: str = ""
+    origin: str = "content"  # "social" (og/twitter/JSON-LD, chosen by the publisher) or "content"
+
+
+@dataclass
 class ArticlePage:
     """Deterministically extracted data from a single article page."""
 
@@ -352,6 +361,7 @@ class ArticlePage:
     published: date | None = None
     image_url: str | None = None
     text: str = ""
+    images: list[ImageRef] = field(default_factory=list)
 
 
 def _meta(soup: BeautifulSoup, *names: str) -> str:
@@ -395,11 +405,51 @@ def _image_from_ld(value: Any) -> str:
     return ""
 
 
+# Folders that hold site-template graphics (theme art, header banners), not article media.
+_TEMPLATE_PATH_HINTS = (
+    "/themes/", "/theme/", "/homepage/", "/header/", "/footer/", "/layout/",
+    # author photos, e.g. secure.gravatar.com/avatar/<hash>
+    "gravatar.com", "/avatar/", "/avatars/",
+)
+
+
+def good_image(url: str) -> bool:
+    """True for URLs that can be article images (not logos, icons, avatars, theme art)."""
+    return _good_image(url)
+
+
 def _good_image(url: str) -> bool:
     lower = url.lower().split("?")[0]
     if not _is_http_link(url) or lower.endswith((".svg", ".gif", ".pdf")):
         return False
-    return not any(hint in lower.rsplit("/", 1)[-1] for hint in _BAD_IMAGE_HINTS)
+    if any(hint in lower for hint in _TEMPLATE_PATH_HINTS):
+        return False
+    name = lower.rsplit("/", 1)[-1]
+    return not any(hint in name for hint in _BAD_IMAGE_HINTS)
+
+
+def _largest_from_srcset(srcset: str) -> str:
+    """Pick the widest candidate from a srcset attribute ("a.jpg 400w, b.jpg 1200w")."""
+    best, best_w = "", -1.0
+    for part in srcset.split(","):
+        bits = part.strip().split()
+        if not bits:
+            continue
+        width = 0.0
+        if len(bits) > 1 and bits[1][:-1].replace(".", "", 1).isdigit():
+            width = float(bits[1][:-1]) * (1 if bits[1].endswith("w") else 1000)
+        if width >= best_w:
+            best, best_w = bits[0], width
+    return best
+
+
+def _img_src(img: Tag) -> str:
+    srcset = img.get("srcset") or img.get("data-srcset") or ""
+    if not srcset and img.parent is not None and img.parent.name == "picture":
+        source = img.parent.find("source", srcset=True)
+        srcset = source["srcset"] if source is not None else ""
+    best = _largest_from_srcset(str(srcset)) if srcset else ""
+    return str(best or img.get("data-src") or img.get("data-lazy-src") or img.get("src") or "")
 
 
 def _pick_main_root(soup: BeautifulSoup) -> Tag:
@@ -470,6 +520,7 @@ def extract_article_page(html: str | bytes, url: str) -> ArticlePage:
         _meta(soup, "twitter:image", "twitter:image:src"),
         *(_image_from_ld(v) for v in _json_ld_values(soup, "image")),
     ]
+    social_images = list(image_candidates)  # captured before scripts are stripped below
 
     _strip_page_chrome(soup)
     root = _pick_main_root(soup)
@@ -502,6 +553,30 @@ def extract_article_page(html: str | bytes, url: str) -> ArticlePage:
     for tag in root.find_all(["aside", "nav", "form"]):
         if not tag.decomposed:
             tag.decompose()
+
+    # All usable images, publisher-chosen social images first, then images inside the
+    # article body (after related-article/share widgets were removed above).
+    seen_images: set[str] = set()
+
+    def add_image(src: str, alt: str, origin: str) -> None:
+        if not src or src.startswith("data:"):
+            return
+        absolute = clean_url(urljoin(url, src.strip()))
+        if absolute in seen_images or not _good_image(absolute):
+            return
+        seen_images.add(absolute)
+        page.images.append(ImageRef(url=absolute, alt=collapse_ws(alt), origin=origin))
+
+    for candidate in social_images:
+        add_image(candidate, "", "social")
+    for img in root.find_all("img"):
+        width = str(img.get("width") or "")
+        height = str(img.get("height") or "")
+        if (width.isdigit() and int(width) < 300) or (height.isdigit() and int(height) < 150):
+            continue
+        add_image(_img_src(img), str(img.get("alt") or img.get("title") or ""), "content")
+        if len(page.images) >= 12:
+            break
 
     page.text = _render_text(root)[:_MAX_ARTICLE_CHARS]
     return page

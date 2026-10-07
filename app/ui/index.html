@@ -101,6 +101,16 @@
   .pr-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 18px; }
   .pr-foot { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 8px; font-size: 13px; color: var(--muted); }
   .modal.wide { max-width: 980px; }
+  .pr-figure { margin: 4px 0 18px; }
+  .pr-figure img { width: 100%; aspect-ratio: 3 / 2; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); background: #fff; }
+  .pr-images { border-top: 1px solid var(--border); margin-top: 18px; padding-top: 14px; }
+  .pr-images h3 { margin: 0 0 4px; font-size: 14px; }
+  .pr-thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin-top: 10px; }
+  .pr-thumb { border: 2px solid var(--border); border-radius: 10px; padding: 4px; background: var(--panel); cursor: pointer; text-align: left; font: inherit; color: inherit; }
+  .pr-thumb img { width: 100%; aspect-ratio: 3 / 2; object-fit: contain; background: #fff; border-radius: 6px; display: block; }
+  .pr-thumb span { display: block; font-size: 11.5px; color: var(--muted); padding: 4px 2px 0; }
+  .pr-thumb.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+  .pr-thumb.none { display: flex; align-items: center; justify-content: center; min-height: 100px; color: var(--muted); font-weight: 600; }
   .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--panel);
     padding: 8px 16px; border-radius: 8px; font-weight: 600; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 30; }
   .toast.show { opacity: 1; }
@@ -190,8 +200,8 @@
     <div class="card section">
       <h3>Written articles</h3>
       <div class="table-wrap"><table>
-        <thead><tr><th>Created</th><th>Headline</th><th>Source</th><th class="num">Words</th><th>Check</th><th></th></tr></thead>
-        <tbody id="pr-body"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody>
+        <thead><tr><th>Created</th><th>Headline</th><th>Source</th><th class="num">Words</th><th>Image</th><th>Check</th><th></th></tr></thead>
+        <tbody id="pr-body"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
       </table></div>
     </div>
   </section>
@@ -574,7 +584,7 @@ const prDate = (iso) => new Date(iso).toLocaleDateString("en-US", {month: "long"
 const hostOf = (u) => { try { return new URL(u).hostname; } catch (_) { return u; } };
 
 async function loadDrafts() {
-  try { draftsCache = await api("/press-releases"); } catch (e) { $("pr-body").innerHTML = `<tr><td colspan="6" class="empty">${esc(e.message)}</td></tr>`; return; }
+  try { draftsCache = await api("/press-releases"); } catch (e) { $("pr-body").innerHTML = `<tr><td colspan="7" class="empty">${esc(e.message)}</td></tr>`; return; }
   draftsByUrl = {};
   for (const d of draftsCache) if (!draftsByUrl[urlKey(d.source_url)]) draftsByUrl[urlKey(d.source_url)] = d.id;
   $("pr-body").innerHTML = draftsCache.length ? draftsCache.map((d) => `<tr>
@@ -582,9 +592,10 @@ async function loadDrafts() {
       <td><a href="#" data-open="${esc(d.id)}">${esc(d.headline)}</a></td>
       <td>${esc(d.source_name || hostOf(d.source_url))}</td>
       <td class="num">${d.word_count}</td>
+      <td>${d.has_image ? '<span class="pill ok">yes</span>' : '<span class="pill">none</span>'}</td>
       <td>${d.warnings ? `<span class="pill warn">${d.warnings} to verify</span>` : '<span class="pill ok">OK</span>'}</td>
       <td><button class="btn small" data-open="${esc(d.id)}" type="button">Open</button></td></tr>`).join("")
-    : '<tr><td colspan="6" class="empty">No articles written yet.</td></tr>';
+    : '<tr><td colspan="7" class="empty">No articles written yet.</td></tr>';
 }
 $("pr-body").addEventListener("click", async (e) => {
   const o = e.target.closest("[data-open]"); if (!o) return; e.preventDefault();
@@ -613,17 +624,39 @@ const draftText = (d) => `${d.headline}\n\nBy ${d.byline} | ${prDate(d.created_a
 const draftHtml = (d) => `<h1>${esc(d.headline)}</h1>\n<p><em>By ${esc(d.byline)} | ${esc(prDate(d.created_at))} | ${d.read_minutes} min read</em></p>\n` +
   d.paragraphs.map((p) => `<p>${esc(p)}</p>`).join("\n");
 
+const imgUrl = (d, file, extra) => `${API}/press-releases/${encodeURIComponent(d.id)}/images/${encodeURIComponent(file)}${extra || ""}`;
+
 function showDraft(d) {
   const section = d.section === "new-products" ? "New Products" : "News";
+  const bust = "?v=" + Date.now();
+  const chosen = d.featured_index != null ? d.images[d.featured_index] : null;
+  const lowRes = chosen && chosen.width < 1000
+    ? `<div class="pr-warn" style="margin:8px 0 0">Low-resolution source image (${chosen.width} × ${chosen.height}) – it was enlarged to 1200 × 800 and may look soft. A larger version is often on the company's media/press-kit page.</div>` : "";
+  const figure = d.featured_file
+    ? `<figure class="pr-figure"><img src="${imgUrl(d, d.featured_file, bust)}" alt="${esc(d.image_alt)}">${lowRes}</figure>`
+    : `<div class="pr-warn" style="margin:4px 0 18px"><b>Image:</b> ${esc(d.image_note || "No image found in the source article.")}</div>`;
+  const body = d.paragraphs.map((p, i) => `<p>${esc(p)}</p>` + (i + 1 === d.image_after_paragraph ? figure : "")).join("");
+  const sel = d.featured_index;
+  const picker = d.images.length ? `
+      <p class="muted" style="margin:0">Images found live on the source article page – the one extracted with the news item comes first. Click one to use it; it is converted to EE Herald's 1200 × 800 px format.</p>
+      <div class="pr-thumbs">
+        ${d.images.map((im, i) => `<button type="button" class="pr-thumb${i === sel ? " selected" : ""}" data-img="${i}">
+          <img src="${imgUrl(d, im.file)}" alt="" loading="lazy"><span>${im.width} × ${im.height}${im.width < 1000 ? " · low-res" : ""}${im.origin === "news" ? " · from the news item" : im.origin === "social" ? " · company's share image" : ""}</span></button>`).join("")}
+        <button type="button" class="pr-thumb none${sel == null ? " selected" : ""}" data-img="none">No image</button>
+      </div>`
+    : `<p class="muted" style="margin:0">${esc(d.image_note || "No image found in the source article.")} (Logos, icons and tiny images are never used.)</p>`;
+
   $("modal-title").textContent = "EE Herald article";
   $("modal-sub").textContent = `${d.word_count} words · ${d.model} · ${money(d.openai_cost_usd)} · source read via ${d.source_fetched_via || "–"}`;
   document.querySelector("#modal .modal").classList.add("wide");
   $("modal-body").innerHTML = `
     <div class="pr-actions">
-      <button class="btn primary small" id="pr-copy-rich" type="button">Copy (formatted)</button>
+      <button class="btn primary small" id="pr-copy-rich" type="button">Copy text (formatted)</button>
       <button class="btn small" id="pr-copy-text" type="button">Copy plain text</button>
-      <a class="btn small" href="${API}/press-releases/${encodeURIComponent(d.id)}/download?format=txt">Download .txt</a>
-      <a class="btn small" href="${API}/press-releases/${encodeURIComponent(d.id)}/download?format=html">Download .html</a>
+      ${d.featured_file ? `<a class="btn small" href="${imgUrl(d, d.featured_file, "?download=true")}">Download image (1200×800)</a>` : ""}
+      <a class="btn small" href="${API}/press-releases/${encodeURIComponent(d.id)}/download?format=zip">Download all (.zip)</a>
+      <a class="btn small" href="${API}/press-releases/${encodeURIComponent(d.id)}/download?format=txt">.txt</a>
+      <a class="btn small" href="${API}/press-releases/${encodeURIComponent(d.id)}/download?format=html">.html</a>
       <button class="btn small" id="pr-regen" type="button">Regenerate</button>
     </div>
     ${d.warnings.length ? `<div class="pr-warn"><b>Check before publishing</b> – not found in the source text:<ul>${d.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></div>` : ""}
@@ -631,19 +664,38 @@ function showDraft(d) {
       <div class="pr-section">${section}${d.tags.length ? " · " + d.tags.map(esc).join(" · ") : ""}</div>
       <h1>${esc(d.headline)}</h1>
       <div class="pr-byline">By ${esc(d.byline)} | ${esc(prDate(d.created_at))} | ${d.read_minutes} min read</div>
-      ${d.paragraphs.map((p) => `<p>${esc(p)}</p>`).join("")}
+      ${body}
       <div class="pr-foot">Teaser: ${esc(d.summary)}<br>Source: <a href="${safeUrl(d.source_url)}" target="_blank" rel="noopener">${esc(d.source_title || d.source_url)}</a>${d.source_name ? " (" + esc(d.source_name) + ")" : ""}</div>
+      <div class="pr-images">
+        <div class="row" style="justify-content:space-between"><h3>Article image</h3>
+          <button class="btn small" id="pr-find-images" type="button">${d.images.length ? "Search again" : "Find images"}</button></div>
+        ${picker}
+      </div>
     </article>`;
+
   $("pr-copy-text").onclick = () => navigator.clipboard.writeText(draftText(d)).then(() => toast("Copied"));
   $("pr-copy-rich").onclick = async () => {
     try {
       await navigator.clipboard.write([new ClipboardItem({
         "text/html": new Blob([draftHtml(d)], {type: "text/html"}),
         "text/plain": new Blob([draftText(d)], {type: "text/plain"})})]);
-      toast("Copied with formatting");
+      toast("Copied with formatting – upload the image separately");
     } catch (_) { navigator.clipboard.writeText(draftText(d)).then(() => toast("Copied")); }
   };
   $("pr-regen").onclick = () => openPressRelease(d.source_url, true, d.source_title, d.source_name);
+  $("pr-find-images").onclick = async () => {
+    const b = $("pr-find-images"); b.disabled = true; b.innerHTML = '<span class="spin"></span> Searching…';
+    try { showDraft(await api(`/press-releases/${encodeURIComponent(d.id)}/images/refresh`, {method: "POST"})); loadDrafts(); }
+    catch (e) { toast(e.message); b.disabled = false; b.textContent = "Find images"; }
+  };
+  document.querySelectorAll("#modal-body [data-img]").forEach((btn) => btn.onclick = async () => {
+    const index = btn.dataset.img === "none" ? null : +btn.dataset.img;
+    try {
+      showDraft(await api(`/press-releases/${encodeURIComponent(d.id)}/featured`, {method: "POST",
+        headers: {"Content-Type": "application/json"}, body: JSON.stringify({index})}));
+      loadDrafts();
+    } catch (e) { toast(e.message); }
+  });
 }
 
 /* ---------- outdated-server check ---------- */

@@ -31,14 +31,14 @@ no code changes are needed (the UI picks up changes on the next click).
    designed for <applications>." Include the single most important specification.
    For partnership, industry or market news, the lead may open with one sentence of
    industry context and then state the announcement ("To help accelerate this transition,
-   X and Y have collaborated on ...").
+   X and Y have collaborated on ...") - but only context the source itself states.
 2. **Context / problem paragraph** - the engineering problem or market trend the
-   announcement addresses and why it matters to designers.
+   announcement addresses, exactly as the source describes it. If the source gives no
+   context, leave this paragraph out. Never supply context from general knowledge.
 3. **Technical detail paragraphs** - architecture, how it works, key specifications with
    exact values and units, part numbers, process nodes, interfaces, packages, operating
-   ranges. Explain specialist terms briefly in-line the first time, e.g.
-   "quantum efficiency, meaning it converts a larger share of incoming light into usable
-   signal", "shutter efficiency, a measure of how well ...".
+   ranges. Explain a specialist term only when the source itself explains it (reuse the
+   source's explanation). Never add your own definitions or background.
 4. **Feature lists** - when the source lists many features, write them as ONE sentence:
    "Key features of the <part> include <feature>; <feature>; ...; and <feature>."
 5. **Quote** - at most one or two, from the most senior named person. Use either
@@ -61,8 +61,13 @@ no code changes are needed (the UI picks up changes on the next click).
   statement disclaimers, social media links, "###", image credits and captions.
 
 ## Accuracy rules (most important)
-- Use ONLY facts stated in the source. Do not add specifications, numbers, dates,
-  customers, competitors, prices or comparisons that are not in the source.
+- The article may contain ONLY information the company published in the source press
+  release. Rewording and restructuring are fine; new information is not.
+- Do not add anything that is not in the source - no specifications, numbers, dates,
+  names, customers, competitors, prices, comparisons, market figures, background, history,
+  definitions, explanations, opinions, predictions or "why it matters" statements - even
+  if they are well known or true.
+- The headline and teaser must also say only what the source says.
 - Copy every number, unit, part number and product name exactly as in the source.
 - Specification tables in the source are given as rows with cells separated by " | ".
   Take the unit for each value from its column header (e.g. a value under "Inductance [μH]"
@@ -86,6 +91,9 @@ no code changes are needed (the UI picks up changes on the next click).
 ---
 
 ## Reference examples (published EE Herald articles)
+
+These show EE Herald's structure and tone. They are not a licence to add explanations:
+only explain a term the way these examples do when your source contains that explanation.
 
 ### Example 1 - New Products (short)
 
