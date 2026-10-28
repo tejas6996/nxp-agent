@@ -311,7 +311,10 @@ class Crawler:
                 elapsed = self._now - datetime.fromisoformat(last)
             except ValueError:
                 elapsed = timedelta.max
-            cooldown = timedelta(hours=self._settings.firecrawl_listing_cooldown_hours)
+            cooldown_hours = float(
+                site.get("firecrawl_cooldown_hours") or self._settings.firecrawl_listing_cooldown_hours
+            )
+            cooldown = timedelta(hours=cooldown_hours)
             if elapsed < cooldown:
                 hours = elapsed.total_seconds() / 3600
                 return SiteScan(
@@ -319,7 +322,7 @@ class Crawler:
                     status="skipped",
                     method="firecrawl",
                     detail=f"Firecrawl site checked {hours:.1f}h ago (cooldown "
-                    f"{self._settings.firecrawl_listing_cooldown_hours:g}h) - saves credits",
+                    f"{cooldown_hours:g}h) - saves credits",
                 )
 
         if not self._budget.try_spend():

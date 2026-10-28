@@ -83,6 +83,7 @@ class PressReleaseDraft(BaseModel):
     section: Literal["news", "new-products"]
     tags: list[str] = Field(default_factory=list)
     summary: str = ""  # one-sentence standfirst / meta description
+    keywords: list[str] = Field(default_factory=list)  # SEO phrases, all found in the source
     paragraphs: list[str] = Field(default_factory=list)
     byline: str = "EEHerald News Desk"
     word_count: int = 0

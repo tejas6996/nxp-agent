@@ -192,3 +192,28 @@ The JSON export (`News_Digest_*.json`) contains, per article: `title`, `url`, `s
 ```bash
 uv run --with pytest --with pytest-asyncio pytest
 ```
+
+---
+
+## Running on the EE Herald server (AI Press Releases in the admin)
+
+The agent also runs on the EE Herald EC2 server, where it feeds **Admin → Content → AI Press Releases**
+on eeherald.com (fetched news with a "Create press release" button, the written press releases, "Move to
+draft article", and the PDF digests).
+
+| What | Value |
+|---|---|
+| Folder | `/home/ubuntu/nxp-agent` (copied files, not a git checkout) |
+| Process | pm2 `nxp-agent` (`ecosystem.config.js`: uvicorn on **127.0.0.1:8100**, `TZ=Asia/Kolkata`, restart above 700 MB) |
+| Schedule | `AUTO_RUN_TIMES=08:00,13:00,19:00` (IST), `FIRECRAWL_RUNS_PER_DAY=3` |
+| Access | Only the EE Herald backend, which sends `INTERNAL_API_TOKEN` (`AI_PRESS_AGENT_TOKEN` in its .env) |
+| Retention | `DIGEST_RETENTION_DAYS=90` |
+
+Writing a press release runs as a background job (`POST /api/v1/press-releases/jobs`, then
+`GET /api/v1/press-releases/jobs/{id}`), because it takes 20-90 seconds - longer than the web proxy waits.
+
+Update the server: copy `app/` and `press_release_guidelines.md` to the folder, then `pm2 restart nxp-agent`.
+A guidelines-only change needs no restart (the file is read for every article).
+
+The laptops and the server use the same Firecrawl key, so runs on laptops spend the same monthly credits.
+

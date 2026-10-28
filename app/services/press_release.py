@@ -28,12 +28,20 @@ from app.infra.firecrawl import FirecrawlClient
 from app.infra.http import HttpFetcher
 from app.infra.openai import OpenAIClient
 from app.models import DraftImage, PressReleaseDraft
-from app.services.images import DownloadedImage, describe_alt, download_images, make_featured
+from app.services.image_history import get_history
+from app.services.images import (
+    DownloadedImage,
+    describe_alt,
+    download_images,
+    make_featured,
+    rank_images,
+)
 from app.services.parsing import (
     ImageRef,
     clean_url,
     collapse_ws,
     extract_article_page,
+    generic_image_name,
     good_image,
     normalize_for_match,
     url_key,
@@ -52,9 +60,10 @@ _SCHEMA: dict[str, Any] = {
         "section": {"type": "string", "enum": ["news", "new-products"]},
         "tags": {"type": "array", "items": {"type": "string"}},
         "summary": {"type": "string"},
+        "keywords": {"type": "array", "items": {"type": "string"}},
         "paragraphs": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["headline", "section", "tags", "summary", "paragraphs"],
+    "required": ["headline", "section", "tags", "summary", "keywords", "paragraphs"],
     "additionalProperties": False,
 }
 
@@ -70,8 +79,9 @@ Output (JSON):
 - "headline": the article headline (rules above).
 - "section": "news" or "new-products".
 - "tags": 2-4 topic tags.
-- "summary": one sentence (max 30 words) summarising the article, for the article teaser / meta description.
-- "paragraphs": the article body, one string per paragraph, in order. Plain text only - no markdown, no headings, no bullet characters.
+- "summary": one plain sentence of 140-160 characters (max 30 words) for the meta description and teaser (rules under "SEO").
+- "keywords": 4-8 search phrases, each copied exactly from the source (rules under "SEO").
+- "paragraphs": the article body, one string per paragraph, in order. Plain text only - no markdown, no headings, no bullet characters. The first sentence must stand on its own as the search snippet.
 
 The source press release is the ONLY source of information. Every fact, number, name, part number, date, quote, explanation and piece of context must come from it. Do not use general knowledge. If something is not in the source, leave it out - a shorter article is better than one with added information."""
 
@@ -169,7 +179,8 @@ async def _get_source_text(
 def _news_image(article: dict[str, Any] | None) -> list[ImageRef]:
     """The image extracted with the news item in the digest (if any)."""
     if article and article.get("image_url") and good_image(article["image_url"]):
-        return [ImageRef(url=article["image_url"], origin="news")]
+        url = article["image_url"]
+        return [ImageRef(url=url, origin="news", generic=generic_image_name(url))]
     return []
 
 
@@ -287,6 +298,28 @@ def unsourced_terms(paragraphs: list[str], headline: str, source_text: str) -> l
     return found
 
 
+def sourced_keywords(keywords: list[str], source_text: str, limit: int = 8) -> list[str]:
+    """Keep only keywords that appear in the source (ignoring case, spaces and hyphens).
+
+    Keywords end up in the page's meta tags, so they follow the same rule as the
+    article: nothing that is not in the source.
+    """
+    source = _squash(source_text)
+    out: list[str] = []
+    seen: set[str] = set()
+    for keyword in keywords:
+        keyword = collapse_ws(keyword).strip(" ,.;")
+        squashed = _squash(keyword)
+        if not keyword or len(keyword) > 60 or not squashed or squashed in seen:
+            continue
+        if squashed in source:
+            seen.add(squashed)
+            out.append(keyword)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def display_date(value: datetime) -> str:
     """EE Herald date style: October 7, 2026."""
     return f"{value:%B} {value.day}, {value.year}"
@@ -333,6 +366,8 @@ async def generate_press_release(
         source_name = source_name or article.get("source_name")
         published = article.get("published_date") or published
     source_title = source_title or fetched_title
+    history = get_history(settings.state_file, settings.output_dir)
+    image_refs = rank_images(image_refs, source_title, url, history)
 
     guidelines = _load_guidelines(settings)
     llm = OpenAIClient(
@@ -365,6 +400,7 @@ async def generate_press_release(
 
     paragraphs = [collapse_ws(p) for p in data.get("paragraphs", []) if collapse_ws(p)]
     headline = collapse_ws(data.get("headline", "")).rstrip(".")
+    summary = collapse_ws(data.get("summary", ""))
     if not headline or not paragraphs:
         raise PressReleaseError("The model returned an empty article. Please try again.")
 
@@ -376,7 +412,8 @@ async def generate_press_release(
         headline=headline,
         section=data.get("section", "news"),
         tags=[collapse_ws(t) for t in data.get("tags", []) if collapse_ws(t)][:4],
-        summary=collapse_ws(data.get("summary", "")),
+        summary=summary,
+        keywords=sourced_keywords(data.get("keywords", []), text),
         paragraphs=paragraphs,
         byline=settings.press_release_byline,
         word_count=words,
@@ -388,10 +425,12 @@ async def generate_press_release(
         source_fetched_via=fetched_via,
         model=llm.model,
         openai_cost_usd=round(llm.usage.cost_usd, 6),
-        warnings=fact_check(paragraphs, headline, text),
+        # The summary becomes the meta description, so it is checked like the body.
+        warnings=fact_check([*paragraphs, summary] if summary else paragraphs, headline, text),
         image_after_paragraph=min(2, len(paragraphs)),
     )
     _store_images(draft, downloaded, failed_images, image_refs, output_dir)
+    _remember_images(history, url, image_refs)
     save_draft(draft, output_dir)
     logger.info(
         "Press release written: %r (%d words, %d images, $%.4f, %d warnings)",
@@ -428,6 +467,34 @@ async def _download_source_images(
 
 def image_dir(output_dir: Path, draft_id: str) -> Path:
     return drafts_dir(output_dir) / draft_id
+
+
+GENERIC_IMAGE_NOTE = (
+    "Only a site-wide picture of the publisher was found (it is not specific to this "
+    "article). Consider replacing it."
+)
+
+
+def _fallback_note(image: DownloadedImage) -> str:
+    """Why the chosen picture is a last resort, or "" when it is the article's own."""
+    if image.generic:
+        return GENERIC_IMAGE_NOTE
+    if image.small:
+        return (
+            f"The source's only image is small ({image.width} x {image.height} px) and was "
+            "enlarged to 1200 x 800. Check its quality or replace it."
+        )
+    return ""
+
+
+def _remember_images(history: Any, article_url: str, refs: list[ImageRef]) -> None:
+    """Record the page's share images, so a site-wide one is recognised on the
+    site's next articles. Never fails the article."""
+    try:
+        history.record(article_url, [r.url for r in refs if r.origin in ("social", "news")])
+        history.save()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not update the image history: %s", exc)
 
 
 def _image_note(refs: list[ImageRef], failed: list[str]) -> str:
@@ -478,6 +545,9 @@ def _store_images(
         draft.image_note = f"The image could not be saved: {exc}"
         return
     set_featured_image(draft, 0, output_dir)
+    if draft.featured_file:
+        # Shown to the editor next to the picture when it is only a last resort.
+        draft.image_note = _fallback_note(downloaded[0])
 
 
 def set_featured_image(draft: PressReleaseDraft, index: int | None, output_dir: Path) -> None:
@@ -513,8 +583,11 @@ async def refresh_images(draft: PressReleaseDraft, settings: Settings) -> PressR
     if result is not None and result.ok and not result.is_challenge and result.is_html:
         refs = extract_article_page(result.content, result.final_url).images
     refs = _merge_refs(_news_image(find_digest_article(draft.source_url, output_dir)), refs)
+    history = get_history(settings.state_file, settings.output_dir)
+    refs = rank_images(refs, draft.source_title or draft.headline, draft.source_url, history)
     downloaded, failed = await _download_source_images(refs, draft.source_url, settings)
     _store_images(draft, downloaded, failed, refs, output_dir)
+    _remember_images(history, draft.source_url, refs)
     draft.image_after_paragraph = min(2, len(draft.paragraphs))
     save_draft(draft, output_dir)
     return draft
@@ -539,6 +612,10 @@ def to_markdown(draft: PressReleaseDraft) -> str:
         f"Section: {section}" + (f" | Tags: {', '.join(draft.tags)}" if draft.tags else ""),
         "",
     ]
+    if draft.summary:
+        lines += [f"Summary: {draft.summary}", ""]
+    if draft.keywords:
+        lines += [f"Keywords: {', '.join(draft.keywords)}", ""]
     for number, paragraph in enumerate(draft.paragraphs, start=1):
         lines += [paragraph, ""]
         if number == draft.image_after_paragraph:

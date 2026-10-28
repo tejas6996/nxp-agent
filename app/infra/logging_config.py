@@ -6,6 +6,7 @@ before any loggers are used.
 """
 
 import logging
+import logging.handlers
 import sys
 
 
@@ -33,7 +34,10 @@ def configure_logging(level: str = "INFO") -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(formatter)
 
-    file_handler = logging.FileHandler("scraper.log", encoding="utf-8")
+    # Rotate so a long-running server never fills the disk (3 x 5 MB).
+    file_handler = logging.handlers.RotatingFileHandler(
+        "scraper.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
     file_handler.setFormatter(formatter)
 
     root_logger = logging.getLogger()

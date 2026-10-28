@@ -8,6 +8,7 @@ and attaches global exception handlers.
 import asyncio
 import contextlib
 import hashlib
+import hmac
 import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -75,6 +76,17 @@ def create_app() -> FastAPI:
         redoc_url="/redoc" if settings.app_env != "production" else None,
         lifespan=lifespan,
     )
+
+    # When INTERNAL_API_TOKEN is set (the EE Herald server), only callers that send it
+    # in X-Internal-Token get an answer; /health stays open for monitoring.
+    @app.middleware("http")
+    async def require_internal_token(request: Request, call_next):  # type: ignore[no-untyped-def]
+        expected = settings.internal_api_token
+        if expected and request.url.path != "/health":
+            given = request.headers.get("x-internal-token", "")
+            if not hmac.compare_digest(given.encode(), expected.encode()):
+                return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+        return await call_next(request)
 
     # Web UI
     @app.get("/", include_in_schema=False)

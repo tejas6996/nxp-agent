@@ -348,7 +348,12 @@ class ImageRef:
 
     url: str
     alt: str = ""
-    origin: str = "content"  # "social" (og/twitter/JSON-LD, chosen by the publisher) or "content"
+    # "news" (picked with the news item), "social" (og/twitter/JSON-LD, chosen by the
+    # publisher), "content" (inside the article body) or "embedded" (only in the page's
+    # script data, matched to the headline)
+    origin: str = "content"
+    # A site-wide picture (default share image, brand card), not this article's own.
+    generic: bool = False
 
 
 @dataclass
@@ -405,12 +410,44 @@ def _image_from_ld(value: Any) -> str:
     return ""
 
 
-# Folders that hold site-template graphics (theme art, header banners), not article media.
+# Folders that hold site-template graphics (theme art, header banners, menu tiles), not
+# article media. Theme folders are matched as CMS theme paths: a media library may well
+# have its own "themes" folder of real photos (ti.com/content/dam/.../images/themes/...).
 _TEMPLATE_PATH_HINTS = (
-    "/themes/", "/theme/", "/homepage/", "/header/", "/footer/", "/layout/",
+    "/wp-content/themes/", "/themes/custom/", "/themes/contrib/", "/sites/all/themes/",
+    "/templates/", "/theme/", "/homepage/", "/header/", "/footer/", "/layout/",
+    "/megamenu/", "/flags/", "/favicon",
     # author photos, e.g. secure.gravatar.com/avatar/<hash>
     "gravatar.com", "/avatar/", "/avatars/",
 )
+
+# Words in a file name that mark a site-wide picture (default share card, brand art)
+# rather than the article's own. Matched as whole words of the name, so "shareholder"
+# or "socially" do not count.
+_GENERIC_NAME_WORDS = frozenset({
+    "default", "defaults", "share", "sharing", "social", "socialmedia", "brand", "branding",
+    "generic", "general", "fallback", "placeholder", "topnav", "nav", "menu", "header",
+    "masthead", "site", "website", "corporate",
+})
+# "og"/"ogp" alone does not make a picture generic: Apple names the article's own share
+# image "...-lp.jpg.og.jpg". Only a name made of nothing but such filler words
+# ("ogp-top.jpeg", "og-image.png") is a site default.
+_SHARE_MARKERS = frozenset({"og", "ogp", "opengraph"})
+_FILLER_WORDS = _SHARE_MARKERS | frozenset({
+    "image", "images", "img", "top", "main", "thumb", "thumbnail", "card", "banner",
+    "large", "big", "small", "jpg", "jpeg", "png", "webp",
+})
+
+
+def generic_image_name(url: str) -> bool:
+    """True if the image's file name says it is a site-wide picture, not the article's."""
+    name = urlparse(url).path.rsplit("/", 1)[-1].lower()
+    stem = name.rsplit(".", 1)[0]
+    words = set(re.split(r"[^a-z0-9]+", stem)) - {""}
+    if words & _GENERIC_NAME_WORDS:
+        return True
+    meaningful = {w for w in words if not w.isdigit() and len(w) > 2}
+    return bool(words & _SHARE_MARKERS) and meaningful <= _FILLER_WORDS
 
 
 def good_image(url: str) -> bool:
@@ -418,14 +455,19 @@ def good_image(url: str) -> bool:
     return _good_image(url)
 
 
-def _good_image(url: str) -> bool:
+def _good_image(url: str, allow_template_path: bool = False) -> bool:
     lower = url.lower().split("?")[0]
     if not _is_http_link(url) or lower.endswith((".svg", ".gif", ".pdf")):
         return False
-    if any(hint in lower for hint in _TEMPLATE_PATH_HINTS):
+    if not allow_template_path and _template_path(url):
         return False
     name = lower.rsplit("/", 1)[-1]
     return not any(hint in name for hint in _BAD_IMAGE_HINTS)
+
+
+def _template_path(url: str) -> bool:
+    lower = url.lower().split("?")[0]
+    return any(hint in lower for hint in _TEMPLATE_PATH_HINTS)
 
 
 def _largest_from_srcset(srcset: str) -> str:
@@ -443,13 +485,133 @@ def _largest_from_srcset(srcset: str) -> str:
     return best
 
 
-def _img_src(img: Tag) -> str:
-    srcset = img.get("srcset") or img.get("data-srcset") or ""
+# Lazy-loading plugins keep the real file in data-* attributes (src is often a blank
+# placeholder). The "full size" ones (WordPress, Jetpack, zoom galleries) come first.
+_FULL_SIZE_ATTRS = ("data-orig-file", "data-large-file", "data-full-url", "data-hi-res-src", "data-zoom-image")
+_SRCSET_ATTRS = ("srcset", "data-srcset", "data-lazy-srcset")
+_LAZY_SRC_ATTRS = ("data-src", "data-lazy-src", "data-original")
+
+
+def _srcset_of(img: Tag) -> str:
+    srcset = next((str(img.get(a)) for a in _SRCSET_ATTRS if img.get(a)), "")
     if not srcset and img.parent is not None and img.parent.name == "picture":
         source = img.parent.find("source", srcset=True)
-        srcset = source["srcset"] if source is not None else ""
-    best = _largest_from_srcset(str(srcset)) if srcset else ""
-    return str(best or img.get("data-src") or img.get("data-lazy-src") or img.get("src") or "")
+        srcset = str(source["srcset"]) if source is not None else ""
+    return srcset
+
+
+def _img_src(img: Tag) -> str:
+    full = next((str(img.get(a)) for a in _FULL_SIZE_ATTRS if img.get(a)), "")
+    srcset = _srcset_of(img)
+    best = _largest_from_srcset(srcset) if srcset else ""
+    lazy = next((str(img.get(a)) for a in _LAZY_SRC_ATTRS if img.get(a)), "")
+    return str(full or best or lazy or img.get("src") or "")
+
+
+def _declared_size(img: Tag, attr: str) -> int | None:
+    match = re.match(r"\s*(\d+)", str(img.get(attr) or ""))
+    return int(match.group(1)) if match else None
+
+
+def _srcset_max_width(srcset: str) -> float:
+    widths = [float(m) for m in re.findall(r"\s(\d+(?:\.\d+)?)w\b", " " + srcset)]
+    return max(widths, default=0.0)
+
+
+def _displayed_small(img: Tag) -> bool:
+    """An icon/thumbnail by its declared size - unless a large file is on offer anyway
+    (a 280px-wide thumbnail often has a 1200w entry in its srcset)."""
+    width, height = _declared_size(img, "width"), _declared_size(img, "height")
+    small = (width is not None and width < 300) or (height is not None and height < 150)
+    return small and _srcset_max_width(_srcset_of(img)) < 600
+
+
+# "photo-1024x576.jpg" (WordPress) or "photo_200px.png": the same picture at a reduced
+# size. The name without the suffix is usually the full-size original.
+_SIZE_SUFFIX = re.compile(
+    r"(?:-\d{2,4}x\d{2,4}|_\d{2,4}px|\.tmb-[a-z0-9]+)(?=\.(?:jpe?g|png|webp|avif)$)", re.I
+)
+
+
+def _full_size_variant(url: str) -> str | None:
+    parts = urlparse(url)
+    path = _SIZE_SUFFIX.sub("", parts.path)
+    return urlunparse(parts._replace(path=path, query="")) if path != parts.path else None
+
+
+_IMAGE_FILE = re.compile(r"\.(?:jpe?g|png|webp|avif)(?:\?|$)", re.I)
+# Image URLs inside script data (Next.js/React payloads, JSON). Escaped slashes and
+# ampersands are undone before matching.
+_IMAGE_URL_IN_TEXT = re.compile(
+    r"""(?:https?:)?//[^\s"'<>()\\]+?\.(?:jpe?g|png|webp|avif)(?:\?[^\s"'<>()\\]*)?"""
+    r"""|(?<![\w.])/[^\s"'<>()\\:]+?\.(?:jpe?g|png|webp|avif)(?:\?[^\s"'<>()\\]*)?""",
+    re.I,
+)
+_HEADLINE_STOPWORDS = frozenset({
+    "about", "after", "announces", "announced", "launch", "launches", "launched", "their",
+    "these", "those", "which", "while", "with", "where", "would", "could", "should", "today",
+    "first", "industry", "global", "company", "introduces", "introducing", "delivers",
+    "unveils", "expands", "release", "releases", "solution", "solutions", "technology",
+    "technologies", "series", "family", "products", "product", "systems", "devices",
+})
+
+
+def _headline_words(title: str, page_url: str) -> set[str]:
+    """Distinctive words of the headline and URL slug (not the company's own name)."""
+    host = (urlparse(page_url).hostname or "").lower()
+    slug = urlparse(page_url).path.rsplit("/", 1)[-1]
+    words = set(re.split(r"[^a-z0-9]+", f"{title} {slug}".lower()))
+    return {w for w in words if len(w) >= 5 and w not in _HEADLINE_STOPWORDS and w not in host}
+
+
+def headline_words(title: str, page_url: str) -> set[str]:
+    return _headline_words(title, page_url)
+
+
+def _unescape_script(text: str) -> str:
+    return (
+        text.replace("\\u003c", "<").replace("\\u003e", ">").replace("\\u0026", "&")
+        .replace("\\u0022", '"').replace('\\"', '"').replace("\\/", "/").replace("&amp;", "&")
+    )
+
+
+_IMG_MARKUP = re.compile(r"<img\b[^>]*>", re.I)
+_ATTR = re.compile(r"""\b(src|data-src|alt)\s*=\s*"([^"]*)\"""", re.I)
+
+
+def _embedded_images(
+    raw_html: str, script_text: str, page_url: str, words: set[str], limit: int = 6
+) -> list[tuple[str, str]]:
+    """(url, alt) of images that appear only in the page's script data.
+
+    Two kinds are trusted: <img> markup inside the scripts (headless CMSes such as
+    Sitecore or Contentful ship the article body as an HTML string in JSON), and image
+    URLs whose file name shares a distinctive word with the headline (so logos and site
+    art never match).
+    """
+    found: list[tuple[str, str]] = []
+
+    def add(url: str, alt: str) -> None:
+        url = urljoin(page_url, url)
+        if all(url != f for f, _ in found):
+            found.append((url, alt))
+
+    for markup in _IMG_MARKUP.findall(_unescape_script(script_text)):
+        attrs = {k.lower(): v for k, v in _ATTR.findall(markup)}
+        src = attrs.get("src") or attrs.get("data-src") or ""
+        if src and not src.startswith("data:"):
+            add(src, attrs.get("alt", ""))
+        if len(found) >= limit:
+            return found
+    if words:
+        for match in _IMAGE_URL_IN_TEXT.finditer(_unescape_script(raw_html)):
+            url = urljoin(page_url, match.group(0))
+            name = urlparse(url).path.rsplit("/", 1)[-1].lower()
+            if any(word in name for word in words):
+                add(url, "")
+                if len(found) >= limit:
+                    break
+    return found
 
 
 def _pick_main_root(soup: BeautifulSoup) -> Tag:
@@ -515,12 +677,17 @@ def extract_article_page(html: str | bytes, url: str) -> ArticlePage:
             page.published = parsed
             break
 
-    image_candidates = [
+    # Captured before scripts and page chrome are stripped below.
+    social_images = [
         _meta(soup, "og:image", "og:image:url", "og:image:secure_url"),
         _meta(soup, "twitter:image", "twitter:image:src"),
+        _link_href(soup, "image_src"),
         *(_image_from_ld(v) for v in _json_ld_values(soup, "image")),
     ]
-    social_images = list(image_candidates)  # captured before scripts are stripped below
+    raw_text = html.decode("utf-8", "ignore") if isinstance(html, bytes) else html
+    script_text = "\n".join(s.string or s.get_text() or "" for s in soup.find_all("script"))
+    headline_words = _headline_words(page.h1 or page.meta_title, url)
+    _rescue_noscript_images(soup)
 
     _strip_page_chrome(soup)
     root = _pick_main_root(soup)
@@ -528,20 +695,6 @@ def extract_article_page(html: str | bytes, url: str) -> ArticlePage:
         time_tag = root.find("time", datetime=True)
         if time_tag is not None:
             page.published = parse_date(time_tag["datetime"])
-
-    for img in root.find_all("img"):
-        src = img.get("src") or img.get("data-src") or ""
-        width = str(img.get("width") or "")
-        if width.isdigit() and int(width) < 300:
-            continue
-        image_candidates.append(str(src))
-
-    for candidate in image_candidates:
-        if candidate:
-            absolute = urljoin(url, candidate.strip())
-            if _good_image(absolute):
-                page.image_url = absolute
-                break
 
     for tag in root.find_all(True):
         if tag.decomposed:
@@ -551,35 +704,87 @@ def extract_article_page(html: str | bytes, url: str) -> ArticlePage:
             if len(tag.get_text(" ", strip=True)) < 2000:
                 tag.decompose()
     for tag in root.find_all(["aside", "nav", "form"]):
-        if not tag.decomposed:
-            tag.decompose()
+        if tag.decomposed:
+            continue
+        # ASP.NET pages (Sitefinity, e.g. bourns.com) wrap the whole page in one <form>:
+        # only small forms (search boxes, sign-ups) are page furniture.
+        if tag.name == "form" and len(tag.get_text(" ", strip=True)) >= 1500:
+            continue
+        tag.decompose()
 
-    # All usable images, publisher-chosen social images first, then images inside the
-    # article body (after related-article/share widgets were removed above).
+    # All usable images: the publisher's share images, then images inside the article
+    # body (after related-article/share widgets were removed above), then images that
+    # only appear in the page's script data and match the headline. Which one is used is
+    # decided later (rank_images); generic site-wide pictures are flagged here.
     seen_images: set[str] = set()
 
     def add_image(src: str, alt: str, origin: str) -> None:
         if not src or src.startswith("data:"):
             return
+        if ",http" in src:
+            # Some CMSes join base and path into one meta value ("https://a.org,https://a.org/x.png").
+            src = "http" + src.rsplit(",http", 1)[1]
         absolute = clean_url(urljoin(url, src.strip()))
-        if absolute in seen_images or not _good_image(absolute):
-            return
-        seen_images.add(absolute)
-        page.images.append(ImageRef(url=absolute, alt=collapse_ws(alt), origin=origin))
+        variant = _full_size_variant(absolute)
+        for candidate in ([variant] if variant else []) + [absolute]:
+            # A share image the publisher set from its theme folder is kept as a site-wide
+            # last resort (better than no picture); theme art elsewhere is never used.
+            share_from_theme = origin == "social" and _template_path(candidate)
+            if candidate in seen_images or not _good_image(candidate, allow_template_path=share_from_theme):
+                continue
+            seen_images.add(candidate)
+            page.images.append(
+                ImageRef(
+                    url=candidate,
+                    alt=collapse_ws(alt),
+                    origin=origin,
+                    generic=share_from_theme or generic_image_name(candidate),
+                )
+            )
 
     for candidate in social_images:
         add_image(candidate, "", "social")
-    for img in root.find_all("img"):
-        width = str(img.get("width") or "")
-        height = str(img.get("height") or "")
-        if (width.isdigit() and int(width) < 300) or (height.isdigit() and int(height) < 150):
-            continue
-        add_image(_img_src(img), str(img.get("alt") or img.get("title") or ""), "content")
-        if len(page.images) >= 12:
-            break
+    def own_images() -> int:
+        return sum(1 for i in page.images if not i.generic)
 
+    for tag in root.find_all(["img", "a"]):
+        # Pages without an <article>/<main> are read from <body>, where header and menu
+        # tiles come first: only the article's own images count toward the cap.
+        if own_images() >= 16 or len(page.images) >= 40:
+            break
+        if tag.name == "a":
+            # A link straight to an image file: usually the full-size original of the
+            # thumbnail it wraps, or a "download high-resolution image" link.
+            href = str(tag.get("href") or "")
+            if _IMAGE_FILE.search(urlparse(href).path + "?"):
+                add_image(href, tag.get_text(" ", strip=True) or str(tag.get("title") or ""), "content")
+            continue
+        if _displayed_small(tag):
+            continue
+        add_image(_img_src(tag), str(tag.get("alt") or tag.get("title") or ""), "content")
+    for src, alt in _embedded_images(raw_text, script_text, url, headline_words):
+        add_image(src, alt, "embedded")
+
+    page.image_url = next(
+        (i.url for i in page.images if not i.generic),
+        page.images[0].url if page.images else None,
+    )
     page.text = _render_text(root)[:_MAX_ARTICLE_CHARS]
     return page
+
+
+def _link_href(soup: BeautifulSoup, rel: str) -> str:
+    tag = soup.find("link", rel=rel, href=True)
+    return str(tag["href"]) if tag is not None else ""
+
+
+def _rescue_noscript_images(soup: BeautifulSoup) -> None:
+    """Lazy-loading pages often put the real <img> only inside <noscript>, which is
+    dropped with the page chrome: move those images out first."""
+    for block in soup.find_all("noscript"):
+        images = block.find_all("img") or _make_soup(block.get_text()).find_all("img")
+        for img in images:
+            block.insert_before(img.extract() if img.parent is not None else img)
 
 
 # ---------------------------------------------------------------------------

@@ -130,6 +130,50 @@ def save_state(state_path: Path, state: dict[str, Any]) -> None:
         raise StatePersistenceError(f"Failed to write state file {state_path}: {exc}") from exc
 
 
+def _lock_owner_gone(lock_path: Path) -> bool:
+    """True when the lock names a process id that is not running on this machine.
+
+    POSIX only: on Windows os.kill(pid, 0) would terminate the process, so there the
+    three-hour age rule alone applies.
+    """
+    if os.name != "posix":
+        return False
+    try:
+        text = lock_path.read_text(encoding="utf-8")
+        pid = int(text.split("pid=", 1)[1].split()[0])
+    except (OSError, IndexError, ValueError):
+        return False
+    if pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except (PermissionError, OSError):
+        return False
+    return False
+
+
+def prune_old_outputs(output_dir: Path, days: int) -> int:
+    """Delete digests and run reports older than `days` days. Returns files removed."""
+    if days <= 0:
+        return 0
+    cutoff = time.time() - days * 86400
+    removed = 0
+    patterns = ["News_Digest_*.pdf", "News_Digest_*.json", "reports/Run_Report_*"]
+    for pattern in patterns:
+        for path in output_dir.glob(pattern):
+            try:
+                if path.is_file() and path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
+            except OSError as exc:
+                logger.warning("Could not delete old output %s: %s", path, exc)
+    if removed:
+        logger.info("Deleted %d digest/report files older than %d days.", removed, days)
+    return removed
+
+
 @contextmanager
 def run_lock(state_path: Path) -> Iterator[None]:
     """Prevent two pipeline runs from using the same state file at the same time.
@@ -149,7 +193,7 @@ def run_lock(state_path: Path) -> Iterator[None]:
                 age = time.time() - lock_path.stat().st_mtime
             except FileNotFoundError:
                 continue
-            if age > _LOCK_STALE_SECONDS:
+            if age > _LOCK_STALE_SECONDS or _lock_owner_gone(lock_path):
                 logger.warning("Removing stale lock file %s (%.0f min old).", lock_path, age / 60)
                 lock_path.unlink(missing_ok=True)
                 continue

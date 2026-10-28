@@ -355,7 +355,7 @@ def test_make_featured_is_always_1200x800() -> None:
 
 async def test_download_images_dedupes_and_orders() -> None:
     from app.infra.http import FetchResult
-    from app.services.images import download_images
+    from app.services.images import download_images, rank_images
     from app.services.parsing import ImageRef
 
     files = {
@@ -366,7 +366,8 @@ async def test_download_images_dedupes_and_orders() -> None:
     }
 
     class FakeHttp:
-        async def fetch(self, url: str, referer: str | None = None) -> FetchResult:
+        async def fetch(self, url: str, referer: str | None = None, accept: str | None = None) -> FetchResult:
+            assert accept and "avif" not in accept  # image requests ask for common formats
             return FetchResult(url, url, 200, files[url], "image/png")
 
     refs = [
@@ -375,7 +376,8 @@ async def test_download_images_dedupes_and_orders() -> None:
         ImageRef("https://x.com/big-share.jpg", "", "social"),
         ImageRef("https://x.com/small-share.jpg", "", "news"),  # image extracted with the news
     ]
-    kept, failed = await download_images(refs, "https://x.com/news", FakeHttp())  # type: ignore[arg-type]
+    ranked = rank_images(refs, "X100 module launched", "https://x.com/news")
+    kept, failed = await download_images(ranked, "https://x.com/news", FakeHttp())  # type: ignore[arg-type]
     # The news item's own image comes first; its larger duplicate is not added again.
     assert [k.source_url for k in kept] == ["https://x.com/small-share.jpg", "https://x.com/product.jpg"]
     assert kept[0].data == files["https://x.com/small-share.jpg"]  # original bytes, unmodified

@@ -19,7 +19,9 @@ from app.dependency import SettingsDep
 from app.infra.firecrawl import FirecrawlClient
 from app.services.parsing import url_key
 from app.services.pipeline import check_sites
+from app.services.press_release import list_drafts
 from app.services.run_manager import RunManager, next_scheduled_run, parse_run_times
+from app.services.site_settings import all_sites, load_site_settings, set_ignored, settings_path
 from app.services.state import load_state
 from app.sites import SITES, select_sites
 
@@ -137,8 +139,13 @@ async def digests(settings: SettingsDep) -> list[dict[str, Any]]:
 
 
 @router.get("/articles")
-async def articles(settings: SettingsDep, days: int = 7) -> list[dict[str, Any]]:
-    """Articles from the JSON exports of the last `days` days (newest digest first, deduplicated)."""
+async def articles(
+    settings: SettingsDep, days: int = 7, light: bool = False
+) -> list[dict[str, Any]]:
+    """Articles from the JSON exports of the last `days` days (newest digest first, deduplicated).
+
+    light=true leaves out the full article text (for long lists).
+    """
     base = _output_dir(settings)
     cutoff = time.time() - days * 86400
     exports = sorted(
@@ -148,6 +155,9 @@ async def articles(settings: SettingsDep, days: int = 7) -> list[dict[str, Any]]
     )
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
+    written: dict[str, str] = {}  # url_key -> newest press release written from it
+    for draft in list_drafts(base):
+        written.setdefault(url_key(draft.source_url), draft.id)
     for path in exports:
         data = _read_json(path)
         if not isinstance(data, dict):
@@ -158,6 +168,11 @@ async def articles(settings: SettingsDep, days: int = 7) -> list[dict[str, Any]]
                 continue
             seen.add(key)
             article["digest"] = path.stem
+            article["press_release_id"] = written.get(key)
+            if light:
+                article.pop("body_text", None)
+                if article.get("summary"):
+                    article["summary"] = article["summary"][:400]
             out.append(article)
     return out
 
@@ -186,12 +201,13 @@ async def get_file(file_path: str, settings: SettingsDep, download: bool = False
 async def sources(settings: SettingsDep) -> list[dict[str, Any]]:
     """Configured sites with what the state file knows about them."""
     try:
-        state = load_state(Path(settings.state_file), SITES)
+        state = load_state(Path(settings.state_file), all_sites(settings))
     except Exception:  # noqa: BLE001
         state = {"sites": {}}
     latest = {r["url"]: r for r in await latest_site_reports(settings)}
+    ignored = load_site_settings(settings_path(settings))["ignored"]
     rows = []
-    for site in SITES:
+    for site in all_sites(settings):
         site_state = state.get("sites", {}).get(site["url"], {})
         report = latest.get(site["url"], {})
         rows.append(
@@ -206,9 +222,31 @@ async def sources(settings: SettingsDep) -> list[dict[str, Any]]:
                 "last_status": report.get("status"),
                 "last_detail": report.get("detail"),
                 "last_new_articles": report.get("new_articles"),
+                "ignored": site["url"] in ignored,
+                "ignored_at": (ignored.get(site["url"]) or {}).get("at"),
+                "custom": bool(site.get("custom")),
+                "added_at": site.get("added_at") if site.get("custom") else None,
             }
         )
     return rows
+
+
+class SourceStateRequest(BaseModel):
+    url: str
+    ignored: bool
+    by: str = ""
+
+
+@router.post("/sources/state")
+async def source_state(body: SourceStateRequest, settings: SettingsDep) -> dict[str, Any]:
+    """Ignore (stop checking) or resume one configured source. Sources themselves are
+    added in app/sites.py; an unknown URL is refused."""
+    site = next((s for s in all_sites(settings) if s["url"] == body.url), None)
+    if site is None:
+        raise HTTPException(status_code=404, detail="Unknown source")
+    entry = set_ignored(settings, site["url"], body.ignored, body.by)
+    logger.info("Source %s %s by %s.", site["name"], "ignored" if body.ignored else "resumed", body.by or "?")
+    return {"name": site["name"], "url": site["url"], "ignored": body.ignored, "ignored_at": entry.get("at")}
 
 
 class CheckRequest(BaseModel):

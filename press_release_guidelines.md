@@ -2,7 +2,12 @@
 
 These are the rules the "Create press release" button follows to turn a company's press
 release into an article in EE Herald's house style. Edit this file to change the style -
-no code changes are needed (the UI picks up changes on the next click).
+no code changes are needed (the next article written picks up the change).
+
+Priority order when rules pull in different directions:
+1. Accuracy - only what the source says (see "Accuracy rules").
+2. EE Herald structure and tone (sections below and the reference examples).
+3. Search-friendliness (see "SEO") - never at the cost of 1 or 2.
 
 ## Voice and audience
 - EE Herald is an independent publication for working electronics and semiconductor
@@ -14,6 +19,8 @@ no code changes are needed (the UI picks up changes on the next click).
   claim (e.g. "the industry's first ..." may stay when the company states it; attribute it).
 - Never address the reader as "you". No calls to action ("contact us", "visit our booth
   today"). No exclamation marks.
+- Plain, direct sentences. Keep paragraphs to 2-5 sentences (about 120 words at most) so
+  the article is easy to read on a phone.
 
 ## Headline
 - One line, Title Case (capitalise principal words), roughly 8-16 words.
@@ -23,12 +30,20 @@ no code changes are needed (the UI picks up changes on the next click).
   - Navitas and Microchip Collaborate on 800V AI Data Center Reference Design
   - Teradyne Titan HP Platform Adds Enhanced Burn-In for High-Power AI Data Center and Automotive Chips
   - OMNIVISION Launches 12MP Global Shutter Sensor for Factory Automation and Intelligent Transportation
-- No trailing period, no "Press Release:" prefix, no quotes.
+  - Micro-Precision Technologies Appoints Kevin Kendrick VP of Sales
+  - JEDEC Publishes First Industry-Wide Silicon Photonics Reliability Standard
+- Put the company and the product (or the main subject) in the first 60-70 characters -
+  search results and browser tabs cut the rest off.
+- No trailing period, no "Press Release:" prefix, no quotes, no question headlines, no
+  clickbait ("You Won't Believe", "Here's Why").
 
 ## Structure (plain paragraphs only - no sub-headings, no bullet lists)
 1. **Lead paragraph** - who did what, with the product or part number and its purpose:
    "<Company full name> has introduced/launched/begun/announced <product>, a <what it is>
    designed for <applications>." Include the single most important specification.
+   The first sentence must make sense on its own: EE Herald uses the opening ~155
+   characters of the article as the Google snippet, so it should name the company, the
+   product or subject, and what it is for.
    For partnership, industry or market news, the lead may open with one sentence of
    industry context and then state the announcement ("To help accelerate this transition,
    X and Y have collaborated on ...") - but only context the source itself states.
@@ -67,7 +82,7 @@ no code changes are needed (the UI picks up changes on the next click).
   names, customers, competitors, prices, comparisons, market figures, background, history,
   definitions, explanations, opinions, predictions or "why it matters" statements - even
   if they are well known or true.
-- The headline and teaser must also say only what the source says.
+- The headline, summary and keywords must also say only what the source says.
 - Copy every number, unit, part number and product name exactly as in the source.
 - Specification tables in the source are given as rows with cells separated by " | ".
   Take the unit for each value from its column header (e.g. a value under "Inductance [μH]"
@@ -76,6 +91,23 @@ no code changes are needed (the UI picks up changes on the next click).
   clear from the source).
 - If the source is thin, write a shorter article. Never pad with generic statements.
 
+## SEO (search-friendly, without changing the facts)
+- Use the full company name and the full product name with its part number at first
+  mention, exactly as the source writes them; a shorter form is fine afterwards. Engineers
+  search for part numbers.
+- Use the source's own words for the technology and the application ("GaN FET",
+  "digital isolator", "AI data center", "ADAS") - these are the phrases people search for.
+  Do not swap them for vaguer synonyms, and do not repeat them unnaturally (no keyword
+  stuffing).
+- Spell out an acronym at first use only when the source spells it out.
+- **summary**: one plain sentence of 140-160 characters (never more than 30 words) for the
+  meta description and article teaser. It names the company, the product or subject, and
+  the main application or result. No quotes, no hype, nothing the article does not say.
+- **keywords**: 4-8 search phrases, each written exactly as it appears in the source -
+  the company, the product family or part number, the technology and the application
+  (e.g. "Renesas", "100V GaN FET", "AI data center power"). No generic words on their
+  own ("technology", "innovation", "solution", "electronics").
+
 ## Length
 - Typically 250-700 words; about 60-80% of the source's length after boilerplate is removed.
   Short announcements (earnings call dates, executive appointments) may be 120-200 words.
@@ -83,7 +115,7 @@ no code changes are needed (the UI picks up changes on the next click).
 ## Section and tags
 - Section: "new-products" for launches of chips, modules, components, boards, tools and
   test equipment; "news" for partnerships, investments, acquisitions, financial results,
-  market research, appointments, events and policy.
+  market research, appointments, events, standards and policy.
 - 2-4 topic tags from: AI, MCU, Power Electronics, GaN, SiC, Automotive, ADAS, EV,
   Sensors, Passive, Memory, RF, 5G, IoT, Embedded, EDA, VLSI, Foundry, Packaging,
   Test & Measurement, Quantum, Connectivity, Displays, Data Center, Security, Market Research.
@@ -122,3 +154,29 @@ Kelly Yan, staff marketing manager at OMNIVISION, said that in situations involv
 Key features of the OG12S10 include its 12MP resolution at 4096 x 3072; a 3.45-micron BSI pixel in a 1.1-inch optical format; 74dB of dynamic range using DCG HDR; a full well capacity of 20,000 electrons with read noise of just 2.8 electrons in DCG mode, meaning it can capture a wide range of light levels with minimal electronic noise; an ultra-short exposure time of 1 microsecond; 106dB of shutter efficiency, a measure of how well the sensor avoids unwanted light contamination between exposures; and support for both a 16-lane sub-LVDS interface running up to 1.1Gbps and a 4-lane MIPI interface.
 
 The OG12S10 comes in a ceramic land grid array (CLGA) package and will be available for sampling in November 2026, with mass production expected in the fourth quarter of 2026. OMNIVISION will also be showcasing the sensor at the VISION Show, Hall 10, Booth 10D10, taking place in Stuttgart, Germany, October 6-8, 2026.
+
+### Example 3 - News (industry standard)
+
+Headline: JEDEC Publishes First Industry-Wide Silicon Photonics Reliability Standard
+
+JEDEC Solid State Technology Association has released JESD264: Silicon Photonics Qualification and Reliability Requirements, the first industry-wide standard created to bring consistent qualification and reliability practices to silicon photonics devices. By setting a common baseline for testing and manufacturing controls, the standard aims to reduce deployment risk and support wider adoption of silicon photonics in high-speed datacenter, telecommunications, and AI networks. It can be downloaded from the JEDEC website.
+
+Silicon photonics (SiPh) is transforming high-speed connectivity by integrating optical and electrical functions on a single chip. As the technology has moved from research labs into large-scale deployment in datacenter and telecom networks, the need for consistent reliability and qualification practices has grown. Unlike traditional CMOS technologies, silicon photonics has lacked a standardized, industry-wide framework for reliability ownership and validation, which has created uncertainty across the supply chain.
+
+JESD264 tackles this by providing a unified framework for qualification and reliability testing across the silicon photonics ecosystem. It is meant to help manufacturers, integrators, and end users lower deployment risk while supporting the integration of complex photonic chipsets that include lasers, modulators, photodiodes, and passive optical structures. It also clarifies reliability responsibilities among foundries, OSATs (Outsourced Semiconductor Assembly and Test providers), and system developers, improving consistency across the ecosystem.
+
+The standard's key features include comprehensive reliability protocols for SiPh dies and integrated chipsets, guidelines for component-level qualification of modulators, photodiodes, and waveguides, clear requirements for assembly processes and laser integration, and expectations for manufacturing process control and traceability.
+
+Mian Quddus, Chairman of the JEDEC Board of Directors, said that as AI, cloud computing, and high-speed communications drive demand for more bandwidth and performance, industry standards become increasingly important. He added that JESD264 helps establish the reliability foundation needed for broader silicon photonics adoption, accelerating innovation and strengthening alignment across the industry.
+
+### Example 4 - News (executive appointment)
+
+Headline: Micro-Precision Technologies Appoints Kevin Kendrick VP of Sales
+
+Micro-Precision Technologies (MPT), a U.S. manufacturer of high-reliability microelectronics for defense and aerospace applications, has appointed Kevin Kendrick as vice president of sales. Kendrick will report to CEO Martin Stensgaard and lead MPT's sales growth strategy, with a focus on expanding the company's hybrid microelectronics business and supporting customers facing increasingly complex challenges around component obsolescence, product lifecycle management, and modernization.
+
+Martin Stensgaard said Kendrick brings a rare combination of experience spanning semiconductors, advanced packaging, manufacturing, and commercial business development. He said Kendrick understands both the technical realities of sustaining legacy defense electronics and the opportunity created as the industry moves toward more modular, open-system architectures, calling that perspective a strong fit for where MPT is headed.
+
+Kendrick joins MPT with broad experience across semiconductor packaging, microelectronics manufacturing, materials, and business development. His career has included leadership and technical roles at Teledyne, Micross Components, Engent, H.B. Fuller, and AdTech, along with ownership of two companies. He previously served as president of the Central Texas Electronics Association and participated in SMTA's Chapter Leadership Committee.
+
+Kendrick will initially focus on expanding strategic customer relationships, strengthening MPT's network of manufacturers' representatives, improving the company's commercial systems and CRM infrastructure, and building a targeted growth strategy centered on high-value defense, aerospace, and space opportunities.

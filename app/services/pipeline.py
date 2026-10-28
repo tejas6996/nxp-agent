@@ -43,8 +43,11 @@ from app.services.create_doc import (
     write_json,
     write_run_report,
 )
+from app.services.image_history import ImageHistory, get_history
+from app.services.images import IMAGE_ACCEPT, rank_images
 from app.services.parsing import parse_date, url_key
-from app.services.state import load_state, run_lock, save_state
+from app.services.site_settings import active_sites, all_sites
+from app.services.state import load_state, prune_old_outputs, run_lock, save_state
 from app.settings import Settings
 from app.sites import SITES
 
@@ -60,7 +63,8 @@ async def run_pipeline(
         PipelineBusyError: If another run is using the same state file.
         StatePersistenceError: If the state file cannot be read or written.
     """
-    sites = dedupe_sites(sites if sites is not None else SITES)
+    # Sources an editor ignored in the EE Herald admin are left out of normal runs.
+    sites = dedupe_sites(sites if sites is not None else active_sites(all_sites(settings), settings))
     state_path = Path(settings.state_file)
     with run_lock(state_path):
         return await _run(settings, sites, state_path, trigger)
@@ -107,7 +111,9 @@ async def _run(
     today = run_at.date()
     errors: list[str] = []
 
+    prune_old_outputs(Path(settings.output_dir), settings.digest_retention_days)
     state = load_state(state_path, sites)
+    history = get_history(settings.state_file, settings.output_dir)
     seen: dict[str, str] = state["seen_urls"]
     site_states: dict[str, dict[str, Any]] = state["sites"]
 
@@ -142,7 +148,7 @@ async def _run(
             # Stage 3: fetch and extract article pages
             logger.info("Stage 3: Fetching %d article pages.", len(to_process))
             processed = await asyncio.gather(
-                *(_process_article(crawler, llm, llm_semaphore, a, today) for a in to_process)
+                *(_process_article(crawler, llm, llm_semaphore, a, today, history) for a in to_process)
             )
             cutoff = today - timedelta(days=settings.lookback_days)
             for listing, (article, problem) in zip(to_process, processed):
@@ -209,6 +215,7 @@ async def _run(
     state["last_run_date"] = today.isoformat()
     state["last_run_at"] = run_at.isoformat()
     save_state(state_path, state)
+    history.save()
     result.errors = errors
     result.openai_calls = llm.usage.calls
     result.openai_input_tokens = llm.usage.input_tokens
@@ -345,6 +352,7 @@ async def _process_article(
     llm_semaphore: asyncio.Semaphore,
     listing: ArticleListing,
     today: date,
+    history: ImageHistory | None = None,
 ) -> tuple[ArticleContent, str | None]:
     """Fetch and extract one article.
 
@@ -383,7 +391,11 @@ async def _process_article(
         article.title = data["title"] or listing.title
         article.published_date = data["date"]
         article.summary = data["summary"] or None
-        article.image_url = page.image_url
+        # The article's own picture rather than a site-wide share image (see images.py).
+        ranked = rank_images(page.images, article.title, listing.url, history)
+        article.image_url = ranked[0].url if ranked else page.image_url
+        if history is not None:
+            history.record(listing.url, [r.url for r in page.images if r.origin == "social"])
         article.body_text = page.text or None
         article.fetched_via = via
         return article, problem if not article.summary else None
@@ -399,7 +411,7 @@ async def _download_images(http: HttpFetcher, articles: list[ArticleContent]) ->
         if not article.image_url:
             return article.url, None
         try:
-            result = await http.fetch(article.image_url, referer=article.url)
+            result = await http.fetch(article.image_url, referer=article.url, accept=IMAGE_ACCEPT)
         except Exception as exc:  # noqa: BLE001
             logger.debug("Image download failed for %s: %s", article.image_url, exc)
             return article.url, None

@@ -73,6 +73,12 @@ class Settings(BaseSettings):
     # Web UI: optional automatic runs while the UI server is running, e.g. "08:00,12:00,16:00,20:00"
     auto_run_times: str = Field(default="", alias="AUTO_RUN_TIMES")
 
+    # Shared secret the EE Herald backend sends in X-Internal-Token. When set, every
+    # endpoint except /health requires it (the server also listens on 127.0.0.1 only).
+    internal_api_token: str = Field(default="", alias="INTERNAL_API_TOKEN")
+    # Digests (PDF/JSON) and run reports older than this are deleted (0 = keep all).
+    digest_retention_days: int = Field(default=0, alias="DIGEST_RETENTION_DAYS")
+
     # Paths
     output_dir: str = Field(default="output_docs", alias="OUTPUT_DIR")
     state_file: str = Field(default="scraper_state.json", alias="STATE_FILE")
