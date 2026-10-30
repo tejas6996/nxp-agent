@@ -59,6 +59,20 @@ def test_a_menu_word_never_removes_the_article_itself() -> None:
     assert "https://acme.com/img/x1-hero.jpg" in [i.url for i in page.images]
 
 
+def test_an_article_wrapper_with_a_menu_word_keeps_its_text_and_pictures() -> None:
+    # The headline sits outside the wrapper, so the "contains an h1" guard can't help.
+    html = """<html><body><h1>Acme Launches X1</h1>
+    <div class="content nav-open"><p>Acme has launched the X1 sensor. """ + "Details follow. " * 40 + """</p>
+    <img src="https://acme.com/img/x1-board.jpg" alt="X1 board"></div>
+    <div class="site-menu"><img src="https://acme.com/img/menu-tile.jpg" alt="tile"></div>
+    </body></html>"""
+    page = extract_article_page(html, "https://acme.com/news/x1")
+    assert "Acme has launched the X1 sensor" in page.text
+    urls = [i.url for i in page.images]
+    assert "https://acme.com/img/x1-board.jpg" in urls
+    assert "https://acme.com/img/menu-tile.jpg" not in urls
+
+
 def test_trademark_superscripts_do_not_leave_stray_letters() -> None:
     html = """<html><body><article><h1>Acme X1</h1>
     <p>The Acme<sup>TM</sup> X1 uses Arm<sup>&reg;</sup> cores and SuperLink<sup>SM</sup>.

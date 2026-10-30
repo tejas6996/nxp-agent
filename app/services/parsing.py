@@ -362,17 +362,20 @@ def _marker_words(tag: Tag) -> set[str]:
     return set(re.split(r"[^a-z0-9]+", marker.lower())) - {""}
 
 
-def _is_menu(tag: Tag) -> bool:
-    """A menu-named container that does not hold the article itself (a wrapper such as
-    class="nav-offset content" around the headline is not a menu)."""
-    return bool(_MENU_WORDS & _marker_words(tag)) and tag.find(["h1", "article", "main"]) is None
+def _is_menu(tag: Tag, root_chars: int = 0) -> bool:
+    """A menu-named container that is not the article itself. A wrapper is the article
+    when it holds the headline, an <article>/<main>, or most of the page's text (e.g.
+    class="content nav-open" around the body copy) - whatever its class says."""
+    if not _MENU_WORDS & _marker_words(tag) or tag.find(["h1", "article", "main"]) is not None:
+        return False
+    return not (root_chars and len(tag.get_text(" ", strip=True)) > root_chars // 2)
 
 
-def _in_menu(tag: Tag) -> bool:
-    """True when the tag sits inside a site menu (see _MENU_WORDS)."""
+def _in_menu(tag: Tag, root: Tag | None = None, root_chars: int = 0) -> bool:
+    """True when the tag sits inside a site menu (see _MENU_WORDS) within `root`."""
     node: Tag | None = tag
-    while node is not None and node.name not in ("body", "html", "[document]"):
-        if _is_menu(node):
+    while node is not None and node is not root and node.name not in ("body", "html", "[document]"):
+        if _is_menu(node, root_chars):
             return True
         node = node.parent
     return False
@@ -741,6 +744,9 @@ def extract_article_page(html: str | bytes, url: str) -> ArticlePage:
         if time_tag is not None:
             page.published = parse_date(time_tag["datetime"])
 
+    # Measured once, before anything is removed: a "menu" holding most of this text is
+    # really the article's wrapper (see _is_menu).
+    root_chars = len(root.get_text(" ", strip=True))
     for tag in root.find_all(True):
         if tag.decomposed:
             continue
@@ -748,7 +754,7 @@ def extract_article_page(html: str | bytes, url: str) -> ArticlePage:
         if any(hint in marker for hint in _ARTICLE_NOISE_HINTS):
             if len(tag.get_text(" ", strip=True)) < 2000:
                 tag.decompose()
-        elif _is_menu(tag) and len(tag.get_text(" ", strip=True)) < 2000:
+        elif _is_menu(tag, root_chars) and len(tag.get_text(" ", strip=True)) < 2000:
             tag.decompose()
     for sup in root.find_all("sup"):
         if not sup.decomposed and sup.get_text(strip=True).lower() in _TRADEMARK_SUPS:
@@ -802,7 +808,7 @@ def extract_article_page(html: str | bytes, url: str) -> ArticlePage:
         # tiles come first: only the article's own images count toward the cap.
         if own_images() >= 16 or len(page.images) >= 40:
             break
-        if _in_menu(tag):  # a menu tile or link is another page's picture
+        if _in_menu(tag, root, root_chars):  # a menu tile or link is another page's picture
             continue
         if tag.name == "a":
             # A link straight to an image file: usually the full-size original of the
