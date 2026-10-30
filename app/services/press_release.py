@@ -44,6 +44,8 @@ from app.services.parsing import (
     generic_image_name,
     good_image,
     normalize_for_match,
+    parse_date,
+    upload_month,
     url_key,
 )
 from app.settings import Settings
@@ -88,6 +90,30 @@ The source press release is the ONLY source of information. Every fact, number, 
 
 class PressReleaseError(AppBaseException):
     """Raised when a press release cannot be generated (e.g. source text unavailable)."""
+
+
+# ---------------------------------------------------------------------------
+# Trademark symbols
+# ---------------------------------------------------------------------------
+
+# Trademark and service marks are the company's legal notation; a news publication writes
+# names plain ("Arm Cortex-M55", "PureCel Plus"). They are removed from the source before
+# the model sees it - so it cannot copy them, and the fact check compares like with like -
+# and again from everything the model writes.
+_TM_TEXT_RE = re.compile(r"(?<=[\w)\]])\((?:TM|SM|R)\)")  # "Intel(R)", "Core(TM)"
+_TM_BETWEEN_RE = re.compile(r"(?<=\w)[™®℠](?=\w)")  # "PureCel®Plus" -> "PureCel Plus"
+_TM_SYMBOL_RE = re.compile(r"[ \t]*[™®℠]")
+_COPYRIGHT_AFTER_WORD_RE = re.compile(r"(?<=\w)©")
+
+
+def strip_trademarks(text: str) -> str:
+    """Remove ™ ® ℠ (and "(TM)"/"(R)"/"(SM)" written after a name, or © glued to one)."""
+    if not text:
+        return text
+    text = _TM_TEXT_RE.sub("", text)
+    text = _TM_BETWEEN_RE.sub(" ", text)
+    text = _TM_SYMBOL_RE.sub("", text)
+    return _COPYRIGHT_AFTER_WORD_RE.sub("", text)
 
 
 # ---------------------------------------------------------------------------
@@ -365,9 +391,10 @@ async def generate_press_release(
         source_title = source_title or article.get("title")
         source_name = source_name or article.get("source_name")
         published = article.get("published_date") or published
-    source_title = source_title or fetched_title
+    source_title = strip_trademarks(source_title or fetched_title)
+    text = strip_trademarks(text)
     history = get_history(settings.state_file, settings.output_dir)
-    image_refs = rank_images(image_refs, source_title, url, history)
+    image_refs = rank_images(image_refs, source_title, url, history, published=parse_date(published))
 
     guidelines = _load_guidelines(settings)
     llm = OpenAIClient(
@@ -398,9 +425,12 @@ async def generate_press_release(
     except AppBaseException as exc:
         raise PressReleaseError(f"Article generation failed: {exc.message}") from exc
 
-    paragraphs = [collapse_ws(p) for p in data.get("paragraphs", []) if collapse_ws(p)]
-    headline = collapse_ws(data.get("headline", "")).rstrip(".")
-    summary = collapse_ws(data.get("summary", ""))
+    def clean(value: Any) -> str:
+        return collapse_ws(strip_trademarks(str(value or "")))
+
+    paragraphs = [clean(p) for p in data.get("paragraphs", []) if clean(p)]
+    headline = clean(data.get("headline", "")).rstrip(".")
+    summary = clean(data.get("summary", ""))
     if not headline or not paragraphs:
         raise PressReleaseError("The model returned an empty article. Please try again.")
 
@@ -411,9 +441,9 @@ async def generate_press_release(
         created_at=now,
         headline=headline,
         section=data.get("section", "news"),
-        tags=[collapse_ws(t) for t in data.get("tags", []) if collapse_ws(t)][:4],
+        tags=[clean(t) for t in data.get("tags", []) if clean(t)][:4],
         summary=summary,
-        keywords=sourced_keywords(data.get("keywords", []), text),
+        keywords=sourced_keywords([clean(k) for k in data.get("keywords", [])], text),
         paragraphs=paragraphs,
         byline=settings.press_release_byline,
         word_count=words,
@@ -483,6 +513,13 @@ def _fallback_note(image: DownloadedImage) -> str:
         return (
             f"The source's only image is small ({image.width} x {image.height} px) and was "
             "enlarged to 1200 x 800. Check its quality or replace it."
+        )
+    if image.old:
+        month = upload_month(image.source_url)
+        when = f"{datetime(month[0], month[1], 1):%B %Y}" if month else "months earlier"
+        return (
+            f"This picture was uploaded in {when}, well before this article - it may be a "
+            "stock photo or from an older release. Check that it fits, or replace it."
         )
     return ""
 
@@ -584,7 +621,10 @@ async def refresh_images(draft: PressReleaseDraft, settings: Settings) -> PressR
         refs = extract_article_page(result.content, result.final_url).images
     refs = _merge_refs(_news_image(find_digest_article(draft.source_url, output_dir)), refs)
     history = get_history(settings.state_file, settings.output_dir)
-    refs = rank_images(refs, draft.source_title or draft.headline, draft.source_url, history)
+    refs = rank_images(
+        refs, draft.source_title or draft.headline, draft.source_url, history,
+        published=parse_date(draft.source_published_date),
+    )
     downloaded, failed = await _download_source_images(refs, draft.source_url, settings)
     _store_images(draft, downloaded, failed, refs, output_dir)
     _remember_images(history, draft.source_url, refs)

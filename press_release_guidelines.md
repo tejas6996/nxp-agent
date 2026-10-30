@@ -22,6 +22,30 @@ Priority order when rules pull in different directions:
 - Plain, direct sentences. Keep paragraphs to 2-5 sentences (about 120 words at most) so
   the article is easy to read on a phone.
 
+## Media style (how a reputed publication writes)
+- **No trademark symbols.** Never write ™, ®, ℠, © or "(TM)", "(R)" after a name. Write
+  product and company names plain: "Arm Cortex-M55", "PureCel Plus-S", "Wi-Fi 7" - keep the
+  company's spelling and capitals, just drop the marks. (The tool also removes any that
+  slip through.)
+- **Rewrite, don't paste.** Report the announcement in EE Herald's own sentences. Apart
+  from direct quotes and exact names, specifications and part numbers, do not copy the
+  release's sentences word for word.
+- **No relative dates.** A release's "today", "this week", "recently" or "currently" is
+  wrong by the time the article is read. Use the stated date ("on October 28, 2026") or
+  leave the timing out. Never open with "today announced".
+- **Attribute claims.** Superlatives and claims the reader cannot verify ("industry's
+  first", "world's smallest", "leading", "up to 40% more efficient") are the company's
+  statements: attribute them in the body ("which the company says is the industry's
+  first ..."). A headline may carry a claim the source makes, as in the examples below.
+- **Company names:** full legal name at first mention exactly as the source writes it
+  ("Murata Manufacturing Co., Ltd."), then the short name ("Murata"). Drop stock tickers
+  ("(NASDAQ: XXXX)") unless the news is financial.
+- **Quotes:** attribute with "said" - not "stated", "commented", "shared" or "added
+  excitedly". Job titles after a name are lowercase ("Jane Doe, vice president of
+  marketing at Acme, said ...").
+- **Active verbs:** "Acme has launched", "X and Y have partnered" - not "It was announced
+  that" or "Acme is pleased to announce".
+
 ## Headline
 - One line, Title Case (capitalise principal words), roughly 8-16 words.
 - Company name + what happened + the product/part name or key spec + the application.
@@ -72,8 +96,9 @@ Priority order when rules pull in different directions:
 
 ## Always remove
 - "About <company>" boilerplate, media/press contacts, phone numbers, e-mail addresses,
-  stock tickers in parentheses unless relevant, trademark notices, forward-looking
-  statement disclaimers, social media links, "###", image credits and captions.
+  stock tickers in parentheses unless relevant, trademark notices and trademark symbols
+  (™ ® ℠ ©), forward-looking statement disclaimers, social media links, "###", image
+  credits and captions.
 
 ## Accuracy rules (most important)
 - The article may contain ONLY information the company published in the source press

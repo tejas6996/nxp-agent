@@ -16,6 +16,7 @@ The original file is kept unmodified; the article uses an EE Herald-format copy
 import asyncio
 import logging
 from dataclasses import dataclass, replace
+from datetime import date
 from io import BytesIO
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -23,7 +24,7 @@ from urllib.parse import urlparse
 from PIL import Image, ImageOps
 
 from app.infra.http import HttpFetcher
-from app.services.parsing import ImageRef, headline_words
+from app.services.parsing import ImageRef, headline_words, upload_month
 
 if TYPE_CHECKING:
     from app.services.image_history import ImageHistory
@@ -52,6 +53,21 @@ _NAMED_GENERIC_PENALTY = 12
 # Orders images within the same kind only: a publisher's own (non-generic) share image
 # stays ahead of body images, which is right for nearly every newsroom.
 _HEADLINE_MATCH_BONUS = 0.5
+# A picture uploaded this many months (or more) before the article was published is
+# probably a stock photo or an older release's picture (e.g. a 2026/04 upload on an
+# October announcement). It drops below the article's other pictures but is still used,
+# with a note, when nothing else exists. One month apart is normal: press photos are
+# often uploaded a few weeks before the release goes out.
+_OLD_UPLOAD_MONTHS = 2
+_OLD_UPLOAD_PENALTY = 1.5
+
+
+def is_old_upload(url: str, published: date | None) -> bool:
+    """True when the image URL's upload folder is _OLD_UPLOAD_MONTHS+ before `published`."""
+    month = upload_month(url)
+    if month is None or published is None:
+        return False
+    return (published.year * 12 + published.month) - (month[0] * 12 + month[1]) >= _OLD_UPLOAD_MONTHS
 
 
 def rank_images(
@@ -59,18 +75,21 @@ def rank_images(
     headline: str,
     article_url: str,
     history: "ImageHistory | None" = None,
+    published: date | None = None,
 ) -> list[ImageRef]:
     """Order image candidates: the article's own pictures first, site-wide ones last.
 
     A picture is generic when its file name says so (default/share/brand...) or the site
     already attached it to a different article. A file name or alt text sharing a
-    distinctive headline word moves an image up. Ties keep the page order.
+    distinctive headline word moves an image up; an upload months older than the article
+    (`published`) moves it down. Ties keep the page order.
     """
     words = headline_words(headline, article_url)
     scored = []
     for index, ref in enumerate(refs):
         reused = history is not None and history.is_generic(article_url, ref.url)
         generic = ref.generic or reused
+        old = is_old_upload(ref.url, published)
         name = f"{urlparse(ref.url).path.rsplit('/', 1)[-1]} {ref.alt}".lower()
         score = _ORIGIN_SCORE.get(ref.origin, 1)
         if any(word in name for word in words):
@@ -79,7 +98,9 @@ def rank_images(
             score -= _NAMED_GENERIC_PENALTY
         elif reused:
             score -= _REUSED_PENALTY
-        scored.append((-score, index, replace(ref, generic=generic)))
+        if old:
+            score -= _OLD_UPLOAD_PENALTY
+        scored.append((-score, index, replace(ref, generic=generic, old=old)))
     return [ref for _, _, ref in sorted(scored, key=lambda item: (item[0], item[1]))]
 
 
@@ -95,6 +116,7 @@ class DownloadedImage:
     fingerprint: int
     generic: bool = False  # a site-wide picture, used only for lack of anything else
     small: bool = False  # below the normal minimum size (a last resort)
+    old: bool = False  # uploaded months before the article (see is_old_upload)
 
 
 def _average_hash(img: Image.Image) -> int:
@@ -161,6 +183,7 @@ async def download_images(
             ref.url, ref.alt, ref.origin, result.content, ext, width, height, fingerprint,
             generic=ref.generic,
             small=width < _MIN_WIDTH or height < _MIN_HEIGHT,
+            old=ref.old,
         )
 
     candidates = refs[:16]

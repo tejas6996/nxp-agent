@@ -392,7 +392,10 @@ async def _process_article(
         article.published_date = data["date"]
         article.summary = data["summary"] or None
         # The article's own picture rather than a site-wide share image (see images.py).
-        ranked = rank_images(page.images, article.title, listing.url, history)
+        ranked = rank_images(
+            page.images, article.title, listing.url, history,
+            published=parse_date(data["date"]) or parse_date(listing.date),
+        )
         article.image_url = ranked[0].url if ranked else page.image_url
         if history is not None:
             history.record(listing.url, [r.url for r in page.images if r.origin == "social"])

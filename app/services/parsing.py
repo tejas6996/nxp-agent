@@ -341,6 +341,48 @@ _ARTICLE_NOISE_HINTS = (
 _MAX_ARTICLE_CHARS = 20_000
 _BAD_IMAGE_HINTS = ("logo", "icon", "sprite", "avatar", "placeholder", "fallback", "blank", "pixel")
 
+# Site menus built from <div>s rather than <nav> (mega menus, product flyouts), recognised
+# by a whole word in their class or id: "ProductMenu_feature", "mega-menu", "navbar". Their
+# pictures belong to other pages - aosmd.com's menu shows an older release's product photo
+# as a "FEATURED" tile, which was picked as the image of an unrelated announcement.
+_MENU_WORDS = frozenset({
+    "menu", "megamenu", "submenu", "navbar", "nav", "navigation", "dropdown", "flyout",
+    "offcanvas",
+})
+# Trademark marks set as superscript text ("Acme<sup>TM</sup>"); EE Herald writes names plain.
+_TRADEMARK_SUPS = frozenset({"tm", "sm", "r", "(r)", "(tm)", "®", "™", "℠"})
+# Upload folders that carry a date: /2026/04/ (WordPress), /2026-09/ (Drupal).
+_UPLOAD_MONTH_RE = re.compile(r"/(20\d{2})[/-](0[1-9]|1[0-2])(?=[/-])")
+
+
+def _marker_words(tag: Tag) -> set[str]:
+    """Whole words of a tag's id and classes ("ProductMenu_tab__YE67" -> product, menu, ...)."""
+    marker = " ".join([str(tag.get("id") or "")] + [str(c) for c in tag.get("class") or []])
+    marker = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", marker)
+    return set(re.split(r"[^a-z0-9]+", marker.lower())) - {""}
+
+
+def _is_menu(tag: Tag) -> bool:
+    """A menu-named container that does not hold the article itself (a wrapper such as
+    class="nav-offset content" around the headline is not a menu)."""
+    return bool(_MENU_WORDS & _marker_words(tag)) and tag.find(["h1", "article", "main"]) is None
+
+
+def _in_menu(tag: Tag) -> bool:
+    """True when the tag sits inside a site menu (see _MENU_WORDS)."""
+    node: Tag | None = tag
+    while node is not None and node.name not in ("body", "html", "[document]"):
+        if _is_menu(node):
+            return True
+        node = node.parent
+    return False
+
+
+def upload_month(url: str) -> tuple[int, int] | None:
+    """(year, month) from an upload folder in the image URL, or None."""
+    match = _UPLOAD_MONTH_RE.search(urlparse(url).path)
+    return (int(match.group(1)), int(match.group(2))) if match else None
+
 
 @dataclass
 class ImageRef:
@@ -354,6 +396,9 @@ class ImageRef:
     origin: str = "content"
     # A site-wide picture (default share image, brand card), not this article's own.
     generic: bool = False
+    # Uploaded two or more months before the article was published: possibly a stock
+    # photo or an older release's picture (set by images.rank_images).
+    old: bool = False
 
 
 @dataclass
@@ -703,6 +748,11 @@ def extract_article_page(html: str | bytes, url: str) -> ArticlePage:
         if any(hint in marker for hint in _ARTICLE_NOISE_HINTS):
             if len(tag.get_text(" ", strip=True)) < 2000:
                 tag.decompose()
+        elif _is_menu(tag) and len(tag.get_text(" ", strip=True)) < 2000:
+            tag.decompose()
+    for sup in root.find_all("sup"):
+        if not sup.decomposed and sup.get_text(strip=True).lower() in _TRADEMARK_SUPS:
+            sup.decompose()
     for tag in root.find_all(["aside", "nav", "form"]):
         if tag.decomposed:
             continue
@@ -752,6 +802,8 @@ def extract_article_page(html: str | bytes, url: str) -> ArticlePage:
         # tiles come first: only the article's own images count toward the cap.
         if own_images() >= 16 or len(page.images) >= 40:
             break
+        if _in_menu(tag):  # a menu tile or link is another page's picture
+            continue
         if tag.name == "a":
             # A link straight to an image file: usually the full-size original of the
             # thumbnail it wraps, or a "download high-resolution image" link.
